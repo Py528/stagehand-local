@@ -1,20 +1,24 @@
 import type { Stagehand } from "@browserbasehq/stagehand";
 import { cfg } from "./config.js";
 import { sleep } from "./utils.js";
+import { setupApiInterceptor, clearCapturedApi } from "./distill.js";
 
 export async function activePage(sh: Stagehand, fallback: any): Promise<any> {
   try {
     const a = await sh.browser?.context?.activePage();
-    if (a) return a;
+    if (a) { setupApiInterceptor(a); return a; }
     const ps = await sh.browser?.context?.pages();
-    if (ps?.length) return ps[ps.length - 1];
+    if (ps?.length) { setupApiInterceptor(ps[ps.length - 1]); return ps[ps.length - 1]; }
   } catch {}
+  setupApiInterceptor(fallback);
   return fallback;
 }
 
 /** Navigate and settle (with domcontentloaded, networkidle, and iframe settle). */
 export async function navigate(page: any, url: string): Promise<void> {
   if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+  clearCapturedApi();
+  setupApiInterceptor(page);
   await page.goto(url);
   await page.waitForLoadState("domcontentloaded").catch(() => {});
   // Try networkidle with short timeout — catches SPAs that load data async

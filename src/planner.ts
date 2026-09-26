@@ -16,6 +16,7 @@ import {
 } from "./conversation.js";
 import { activePage, navigate, dismissCookies, captureScreenshotBase64 } from "./browser.js";
 import type { PlanAction } from "./types.js";
+import { distillPage, getCapturedApiData, fastExtract, buildPlannerSnapshot } from "./distill.js";
 
 export const PLANNER_PROMPT = `You are an autonomous web agent planner controlling a browser.
 Given the user goal, current page, action history, and session context, decide ONE next action.
@@ -38,10 +39,22 @@ Rules:
   * Once the requested video is open and positioned as requested, return "done" with a concise confirmation message. Do NOT loop actions on the player.
 - DO NOT repeat an action that failed or already succeeded — check history and dynamically adjust your plan.
 - If you have navigated to the destination page and extracted the factual answer satisfying the goal, return "done" with the answer summary.
+- If a "Page Snapshot" is provided, use it to understand what interactive elements (buttons, links, inputs) and content are on the current page. Target actions at real elements you can see in the snapshot.
 - Return ONLY valid JSON.`;
 
 /** Extract and return the raw text. */
 export async function extractText(sh: Stagehand, instruction: string, page: any): Promise<string> {
+  // Try fast extract via distilled page content (smaller prompt → faster prefill)
+  try {
+    const distilled = await distillPage(page);
+    const apiData = getCapturedApiData();
+    if (distilled.content.length > 50 || apiData) {
+      const fast = await fastExtract(distilled, instruction, apiData);
+      if (fast && fast.length > 10) return fast;
+    }
+  } catch { /* fall through to full extract */ }
+
+  // Full Stagehand extract (processes full AXTree — slower but more thorough)
   const result = await retry(() => sh.extract(instruction, { page }), "Extract");
   const data = typeof result.data === "string" ? result.data : result.data?.extraction || JSON.stringify(result.data, null, 2);
   return data;
@@ -231,6 +244,15 @@ export async function runAgent(
     const title = await page.title().catch(() => "");
 
     console.log(`[${step}/${cfg.agent.maxSteps}] 📍 "${title || "Blank"}" (${url})`);
+
+    // Distill page for planner context (~20ms in-browser)
+    const distilled = await distillPage(page);
+    const apiData = getCapturedApiData();
+    const snapshot = buildPlannerSnapshot(distilled, apiData);
+    if (distilled.interactive.length > 0 || distilled.content.length > 50) {
+      console.log(`   📄 Distilled: ${distilled.interactive.length} elements, ~${Math.round(distilled.content.length / 4)} tokens`);
+    }
+
     process.stdout.write(`   🤔 Planning...\r`);
 
     let plan: any;
@@ -242,7 +264,9 @@ export async function runAgent(
             { role: "system", content: PLANNER_PROMPT },
             {
               role: "user",
-              content: `Goal: "${goal}"\nPage: "${title}" (${url})\nHistory:\n${
+              content: `Goal: "${goal}"\nPage: "${title}" (${url})${
+                snapshot ? `\n\nPage Snapshot:\n${snapshot}` : ""
+              }\nHistory:\n${
                 history.length ? history.map((h, i) => `${i + 1}. ${h}`).join("\n") : "None"
               }${contextNote}`,
             },

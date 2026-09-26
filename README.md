@@ -53,6 +53,7 @@ stagehand-local/
 │   ├── conversation.ts   # Session state buffer, fact-pinning context manager, thinking mode Q&A
 │   ├── files.ts          # Inline @file parser, workspace scanner, PDF reader (pdf-parse), editor spawner
 │   ├── browser.ts        # Playwright lifecycle, DOM settling, zero-cost cookie dismissal, screenshots
+│   ├── distill.ts        # In-browser DOM distillation, SPA API interception, fast extract & snapshot builder
 │   ├── llm.ts            # OpenAI client adapter, Stagehand custom model provider & schema prompts
 │   ├── planner.ts        # Autonomous multi-step planning loop, adaptive replanning, conclusive evaluator
 │   ├── scan.ts           # CSV batch URL extractor with real-time stream processing
@@ -76,6 +77,7 @@ flowchart TD
         Planner[Adaptive Multi-Step Planner - planner.ts]
         FastPath[Direct URL & Shortcut Fast Path - browser.ts]
         Mem[Pinned Context Buffer - conversation.ts]
+        Distill[DOM Distiller & API Interceptor - distill.ts]
     end
 
     subgraph LLM_Adapter [Local LLM Adapter Layer]
@@ -95,6 +97,8 @@ flowchart TD
     Router --> FastPath
     Router --> Mem
 
+    Planner --> Distill
+    Distill --> Playwright
     Planner --> StagehandSDK
     FastPath --> Playwright
     StagehandSDK --> LLMAdapter
@@ -134,6 +138,14 @@ Modern SPAs constantly hydrate and detach frames during load. Stagehand Local in
 - **Pinned Facts**: Attached files (`@file`, `/attach`) and the most recent page extraction are locked with `pinned: true` and are never evicted.
 - **Selective Pruning**: Transient chit-chat and stale history are pruned when exceeding the context budget (`contextWindowChars: 24000`, ~6,000 tokens), with explicit budget warnings.
 - **Deduplication**: Automatically detects overlapping text pastes (>60% similarity) and replaces previous entries in-place.
+
+### 6. DOM Distillation & Fast Extraction (70%–90% Token Reduction)
+When running on local hardware (e.g., Apple Silicon unified memory), evaluating large prompts is a major performance bottleneck: processing 10,000–30,000 tokens from raw HTML or Stagehand's full CDP Accessibility tree takes 15–30 seconds, balloons the KV cache, and causes swap thrashing. Stagehand Local introduces a multi-tier distillation engine in `src/distill.ts`:
+
+- **In-Browser DOM Distillation (`distillPage`)**: Runs entirely inside the browser via `page.evaluate()` in ~10–25ms. Strips styling, scripts, SVGs, and invisible elements, outputting clean semantic headings (`h1`–`h4`), visible interactive controls with ARIA labels and input types, and text blocks. Reduces page payload to **~1,000–2,000 tokens** (70%–90% reduction).
+- **Network & SPA State Interception (`setupApiInterceptor`)**: Injects an in-browser hook via `page.addInitScript()` to capture XHR and `fetch` requests matching internal JSON endpoints (`/api/`, `/v1/`, `/graphql`, `.json`), as well as SPA globals (`window.__NEXT_DATA__`, `window.ytInitialData`). Modern SPAs return clean JSON (200–500 tokens) that completely bypasses DOM evaluation.
+- **Fast Extract Path (`fastExtract`)**: Runs extraction prompts against distilled markdown or captured JSON instead of invoking Stagehand's full accessibility tree serializer. Executes in ~1–2s with 10x faster prefill; automatically falls back to full Stagehand extraction if distilled data is insufficient.
+- **Planner Page Snapshots (`buildPlannerSnapshot`)**: Injects a compact snapshot of visible interactive controls and headings directly into each planner step prompt (~500 tokens), giving the planner exact visibility into page state without guessing.
 
 ---
 
