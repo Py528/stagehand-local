@@ -140,31 +140,65 @@ Modern SPAs constantly hydrate and detach frames during load. Stagehand Local in
 - **Deduplication**: Automatically detects overlapping text pastes (>60% similarity) and replaces previous entries in-place.
 
 ### 6. DOM Distillation & Fast Extraction (70%–90% Token Reduction)
-When running on local hardware (e.g., Apple Silicon unified memory), evaluating large prompts is a major performance bottleneck: processing 10,000–30,000 tokens from raw HTML or Stagehand's full CDP Accessibility tree takes 15–30 seconds, balloons the KV cache, and causes swap thrashing. Stagehand Local introduces a multi-tier distillation engine in `src/distill.ts`:
+When running on local hardware (e.g., Apple Silicon unified memory), evaluating large prompts is a major performance bottleneck: processing 10,000–30,000 tokens from raw HTML or Stagehand's full CDP Accessibility tree takes 15–30 seconds, balloons the KV cache, and causes swap thrashing or timeouts. Stagehand Local introduces a multi-tier distillation and extraction engine in `src/distill.ts` and `src/planner.ts`:
 
-- **In-Browser DOM Distillation (`distillPage`)**: Runs entirely inside the browser via `page.evaluate()` in ~10–25ms. Strips styling, scripts, SVGs, and invisible elements, outputting clean semantic headings (`h1`–`h4`), visible interactive controls with ARIA labels and input types, and text blocks. Reduces page payload to **~1,000–2,000 tokens** (70%–90% reduction).
+- **Deep In-Browser DOM Distillation (`distillPage`)**:
+  - Runs inside the browser via `page.evaluate()` in ~10–25ms.
+  - Strips styling, scripts, SVGs, and invisible elements, outputting semantic headings (`h1`–`h4`), visible interactive controls, and structured content blocks.
+  - **Deep Text & List Capture**: Targets headings, paragraphs, list items (`li`, `[role="listitem"]`), table rows (`tr`, `td`, `th`), and role/card elements (`[class*="job"]`, `[class*="career"]`, `[class*="position"]`). Captures badges as short as 5 chars (e.g., `"Remote"`, `"Full Time"`).
+  - **Noise Filtering & Deduplication**: Skips headers, navigation bars (`<nav>`), and footers (`<footer>`) to ensure content slots aren't stolen by site menus. Prunes container redundancies while preserving multi-span composite list items.
+  - Generates up to **12,000 characters** (~3,000 tokens) across up to 150 content blocks, ensuring complete job boards (e.g., 35+ openings on Roboflow careers) fit in a single distilled snapshot.
+
+- **MiniSearch Pre-Extraction Filter (`rankDistilledBlocks`)**:
+  - Automatically indexes distilled text blocks using in-memory full-text search (`minisearch` with `prefix: true` and `fuzzy: 0.2`).
+  - Strips natural language question stop-words (`find`, `extract`, `all`, `from`, `for`) from the extraction instruction.
+  - Slices the top 5–8 most relevant blocks into `fastExtract()`, reducing prompt size from thousands of characters down to **~180 tokens** for lightning-fast, hallucination-free evaluation on Gemma 4.
+
+- **Dedicated Google SERP Distiller (`distillGoogleSearch`)**:
+  - Extracts Google Search results without injecting ads, related searches, tracking parameters, or footer bloat.
+  - **Opportunistic Zero-Hop Completion**: Inspects visible Google AI Overviews and Featured Snippets (`div[data-attrid="wa:/description"]`, `div.LGOjhe`). If the snippet conclusively answers factual questions (e.g. definitions, dates, facts), the agent completes immediately in step 1 (0 extra navigations, ~120 tokens).
+  - **Clean Organic Results**: Extracts top 7 organic results (Title + destination URL). Drops SERP planner prompt size from ~800 tokens to **~120 tokens**, allowing the planner to navigate directly (`{"action":"navigate","url":"https://roboflow.com/careers"}`) or click by title instead of executing fragile, deep XPath selectors.
+
+- **Resilient Multi-Tier Fallback Extraction (`extractText`)**:
+  - Eliminates the local LLM timeouts that occur when falling back to Stagehand's 30,000-token full AXTree dump:
+    1. **Tier 1 (Distilled Fast Extract)**: Ingests top ranked distilled content and intercepted API responses. Succeeds in ~1–2s on 90%+ of pages.
+    2. **Tier 2 (Scoped Locator Extract)**: If distillation was partial, dynamically locates the primary content container (`main`, `#content`, `#main-content`, `.jobs`, `.careers`, `[role="main"]`, `article`, `section`) and scopes Stagehand's extract using `page.locator(mainSelector)` and `{ selector }`.
+    3. **Tier 3 (Direct In-Browser Text Extract)**: Pulls up to 15,000 characters of visible DOM `innerText` from main content containers and feeds it directly to the local model, completely bypassing AXTree serialization.
+    4. **Unscoped Fallback Guard**: Strictly rejects bare unscoped full-page AXTree dumps to guarantee local inference stability.
+
 - **Network & SPA State Interception (`setupApiInterceptor`)**: Injects an in-browser hook via `page.addInitScript()` to capture XHR and `fetch` requests matching internal JSON endpoints (`/api/`, `/v1/`, `/graphql`, `.json`), as well as SPA globals (`window.__NEXT_DATA__`, `window.ytInitialData`). Modern SPAs return clean JSON (200–500 tokens) that completely bypasses DOM evaluation.
-- **Fast Extract Path (`fastExtract`)**: Runs extraction prompts against distilled markdown or captured JSON instead of invoking Stagehand's full accessibility tree serializer. Executes in ~1–2s with 10x faster prefill; automatically falls back to full Stagehand extraction if distilled data is insufficient.
-- **Planner Page Snapshots (`buildPlannerSnapshot`)**: Injects a compact snapshot of visible interactive controls and headings directly into each planner step prompt (~500 tokens), giving the planner exact visibility into page state without guessing.
+- **Fast Extract Path (`fastExtract`)**: Runs extraction prompts against distilled markdown or captured JSON instead of invoking Stagehand's full accessibility tree serializer. Executes in ~1–2s with 10x faster prefill.
+- **Planner Page Snapshots (`buildPlannerSnapshot`)**: Injects a compact snapshot of visible interactive controls, organic search results, and page headings directly into each planner step prompt (~500 tokens), giving the planner exact visibility into page state without guessing.
 
-### 7. Three-Tier Execution Pipeline & Hermes Site Memory
-To completely eliminate unnecessary prompt evaluations and prevent memory pressure on local hardware, Stagehand Local uses a tiered decision engine:
+### 7. Three-Tier Execution Pipeline & Telemetry
+To completely eliminate unnecessary prompt evaluations and prevent memory pressure on local hardware, Stagehand Local uses a tiered decision engine with automated telemetry:
 
 - **Tier 0: Deterministic Fast-Paths (`src/heuristics.ts`) — 0 Tokens, <100ms**
   - Executes pure DOM scripting and verified Playwright selectors for zero-ambiguity tasks:
+    - **Google SERP Fast-Hop**: On Google Search pages, checks for visible direct answers or automatically resolves the first clean organic result (`page.locator('#search a[href^="http"]:not([href*="google.com"])').first()`) and fast-hops directly into the destination URL (`continueLoop: true`), completely bypassing the LLM planner.
     - **Media Player Automation**: Play, pause, skip/seek (e.g. `"skip 30 seconds"`, `"jump to 2 minutes"`), mute, and fullscreen on YouTube and native HTML5 `<video>` players.
-    - **YouTube Instant Play**: Searches YouTube and directly clicks the first video renderer.
-    - **Search Result Deep Navigation**: Clicks the first organic link on Google/Bing search results without wasting a planner turn.
+    - **YouTube Instant Search & Play**: Directly parses natural language media requests (e.g. `"play crown on youtube from txt"`) into YouTube search URLs from `about:blank`, ranks video results by goal keyword relevance (matching title and artist/channel), and automatically verifies playback on `/watch?v=...` pages.
+
     - **Semantic Subpage Traversal**: Automatically navigates to standard subpages (`careers`, `pricing`, `contact`, `docs`, `about`, `login`) via matching anchor attributes.
 - **Tier 1: Hermes Site Memory & Archetype Detection (`src/playbook.ts`)**
+  - **Direct ATS API Fast-Path (<200ms, 0 DOM tokens)**: When visiting or linking to modern ATS providers (**Ashby**, **Greenhouse**, **Lever**), the agent intercepts or scans for ATS endpoints and fetches the complete job board via public REST APIs (`api.ashbyhq.com/posting-api/job-board/{org}`, `boards-api.greenhouse.io/v1/boards/{org}/jobs`, `api.lever.co/v0/postings/{org}`). Completely bypasses DOM rendering and prompt generation.
   - **Persistent Site Playbooks (`data/playbooks.json`)**: Tracks visited domains, historical success rates, verified selectors, and direct URL shortcuts.
   - **SPA API Endpoint Memory**: When Stagehand intercepts internal JSON endpoints (e.g. Job board endpoints, catalog APIs), it indexes them to the site's playbook for instant retrieval on future visits.
   - **Master Archetype Fingerprinting**: Includes built-in archetype templates (e.g., ATS/Careers: Lever, Greenhouse, Ashby; E-Commerce: Shopify; Media: YouTube). In-browser fingerprinting evaluates DOM signals, script paths, and globals (`window.__NEXT_DATA__`, `window.Shopify`, `window.ytInitialData`). When a site matches ≥2 signals, it automatically inherits known selectors and endpoints.
   - **Autonomous Auto-Learning**: Automatically updates domain records upon every successful extraction or task completion.
 - **Tier 2: Distilled DOM + Fast Local LLM Planning (`src/planner.ts`)**
   - When heuristics and playbook shortcuts do not apply, the agent falls back to local LLM planning using lightweight distilled page snapshots (~500 tokens) rather than raw HTML or full CDP accessibility trees.
+  - **Anti-Repeat "Action Dedup" Circuit Breaker**: Detects repeated empty extraction attempts on the same page. Rather than repeating identical intents across multiple steps, the circuit breaker immediately forces an ATS direct API fetch, navigates to discovered subpage links, or triggers a dynamic reveal scroll.
+- **🛡️ Network-Level Consent SDK Route Blocking (`src/browser.ts`)**
+  - Intercepts and aborts common third-party cookie and consent banner scripts (`onetrust`, `cookiebot`, `usercentrics`, `klaro`, `termly`) at the Playwright network route level before they mount into the DOM.
+- **📊 Tier Hit Telemetry & Execution Stats**
+  - Tracks session counters for every executed step across Tier 0, Tier 1, and Tier 2, logging a one-line summary upon goal completion:
+    ```text
+    📊 [Execution Stats] Tier 0 (Heuristic): 2 | Tier 1 (Playbook): 1 | Tier 2 (LLM): 1 | LLM Calls Skipped: 3
+    ```
 
 ---
+
 
 ## 📋 Prerequisites
 
@@ -208,12 +242,16 @@ npx playwright install chromium
 ```
 
 ### 2. Verify Configuration (`config.json`)
-Ensure your LLM endpoint and model ID match your running server:
+Ensure your LLM endpoint, model ID, and timeouts match your running server:
 ```json
 {
   "llm": {
     "baseURL": "http://127.0.0.1:8080/v1",
-    "modelId": "unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ4_XS"
+    "modelId": "unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ4_XS",
+    "stepTimeoutMs": 120000
+  },
+  "shortcuts": {
+    "google": "https://www.google.com/search?q={{query}}&hl=en"
   }
 }
 ```

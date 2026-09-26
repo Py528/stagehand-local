@@ -13,12 +13,21 @@ import {
   addToConversation,
   pinLatestExtraction,
   getConversationContext,
+  sessionMetrics,
+  resetSessionMetrics,
+  logSessionMetrics,
 } from "./conversation.js";
 import { activePage, navigate, dismissCookies, captureScreenshotBase64 } from "./browser.js";
 import type { PlanAction } from "./types.js";
-import { distillPage, getCapturedApiData, fastExtract, buildPlannerSnapshot } from "./distill.js";
+import {
+  distillPage,
+  getCapturedApiData,
+  fastExtract,
+  buildPlannerSnapshot,
+  distillGoogleSearch,
+} from "./distill.js";
 import { tryHeuristic } from "./heuristics.js";
-import { playbooks, autoLearnFromPage } from "./playbook.js";
+import { playbooks, autoLearnFromPage, tryDirectAtsFetch, findAtsUrlOnPage } from "./playbook.js";
 
 export const PLANNER_PROMPT = `You are an autonomous web agent planner controlling a browser.
 Given the user goal, current page, action history, and session context, decide ONE next action.
@@ -32,13 +41,14 @@ Actions:
 
 Rules:
 - For search queries (Google, YouTube, GitHub, etc.), navigate directly to the search URL when starting.
+  * Search Query Entity Preservation: Include ALL identifying keywords (subject, song title, and artist/channel/author name) in the search query URL. Never truncate or omit the artist/source name (e.g. "play crown on youtube from txt" → navigate to "https://www.youtube.com/results?search_query=crown+txt", NOT just "crown").
 - Multi-step Research & Deep Navigation:
-  * A search results page (e.g. Google Search) is only an index of links. To answer specific questions (e.g. company job openings, career roles, product features, pricing, documentation), DO NOT extract repeatedly on the search engine page. Use "act" to CLICK the most relevant organic search result or careers link to visit the actual website (e.g. {"action":"act","instruction":"click on the Roboflow careers or jobs search result link"})!
+  * A search results page (e.g. Google Search) is only an index of links. To answer specific questions (e.g. company job openings, career roles, product features, pricing, documentation), DO NOT extract repeatedly on the search engine page. Use "navigate" to the target URL directly from the results or use "act" to CLICK the most relevant organic search result or careers link to visit the actual website (e.g. {"action":"navigate","url":"https://roboflow.com/careers"} or {"action":"act","instruction":"click on the Roboflow careers search result link"})!
   * Once on the company's real website or careers board, THEN use "extract" to read the actual job listings or page content.
 - For video/media playback (e.g. YouTube):
-  * On search results: click the video title or thumbnail to open it.
+  * On search results: click the video title or thumbnail that best matches the requested title and artist.
   * On the video page (/watch?v=...): you can seek to a timestamp by navigating to the URL with "&t=60s" (for 1 minute ahead) or clicking the video timeline.
-  * Once the requested video is open and positioned as requested, return "done" with a concise confirmation message. Do NOT loop actions on the player.
+  * Once the requested video is open, loaded, or playing, return "done" immediately with a concise confirmation message. Do NOT loop actions on the player.
 - DO NOT repeat an action that failed or already succeeded — check history and dynamically adjust your plan.
 - If you have navigated to the destination page and extracted the factual answer satisfying the goal, return "done" with the answer summary.
 - If a "Page Snapshot" is provided, use it to understand what interactive elements (buttons, links, inputs) and content are on the current page. Target actions at real elements you can see in the snapshot.
@@ -46,20 +56,80 @@ Rules:
 
 /** Extract and return the raw text. */
 export async function extractText(sh: Stagehand, instruction: string, page: any): Promise<string> {
-  // Try fast extract via distilled page content (smaller prompt → faster prefill)
+  // 1. Try fast extract via distilled page content (smaller prompt → faster prefill)
   try {
     const distilled = await distillPage(page);
     const apiData = getCapturedApiData();
     if (distilled.content.length > 50 || apiData) {
       const fast = await fastExtract(distilled, instruction, apiData);
-      if (fast && fast.length > 10) return fast;
+      if (fast && isExtractionValid(fast)) return fast;
     }
-  } catch { /* fall through to full extract */ }
+  } catch { /* fall through */ }
 
-  // Full Stagehand extract (processes full AXTree — slower but more thorough)
-  const result = await retry(() => sh.extract(instruction, { page }), "Extract");
-  const data = typeof result.data === "string" ? result.data : result.data?.extraction || JSON.stringify(result.data, null, 2);
-  return data;
+  // 2. Scoped fallback: Detect the main content container via quick DOM evaluation.
+  // Never allow an unscoped fallback to avoid 20,000+ token AXTree dumps and timeouts.
+  try {
+    const mainSelector = await page.evaluate(() => {
+      const candidates = [
+        "main",
+        "#content",
+        "#main-content",
+        '[role="main"]',
+        ".jobs",
+        ".careers",
+        ".openings",
+        "article",
+        "section",
+      ];
+      for (const c of candidates) {
+        const el = document.querySelector(c);
+        if (el && (el as HTMLElement).innerText && (el as HTMLElement).innerText.length > 80) {
+          return c;
+        }
+      }
+      return null;
+    }).catch(() => null);
+
+    if (mainSelector) {
+      try {
+        const locator = typeof page.locator === "function" ? page.locator(mainSelector) : undefined;
+        const scopedResult = await retry(
+          () => sh.extract(instruction, { page, locator, selector: mainSelector } as any),
+          "ScopedExtract"
+        );
+        const data =
+          typeof scopedResult.data === "string"
+            ? scopedResult.data
+            : scopedResult.data?.extraction || JSON.stringify(scopedResult.data, null, 2);
+        if (isExtractionValid(data)) return data;
+      } catch {
+        // Scoped locator failed, fall through to direct text
+      }
+    }
+  } catch {}
+
+  // 3. Fallback: Direct visible text extraction from DOM to local LLM
+  // Bypasses Stagehand's 30,000-token AXTree dump completely
+  try {
+    const visibleText = await page.evaluate(() => {
+      const main =
+        document.querySelector('main, #content, [role="main"], .jobs, .careers, article') ||
+        document.body;
+      return (main as HTMLElement).innerText?.slice(0, 15000) || "";
+    }).catch(() => "");
+
+    if (visibleText && visibleText.length > 80) {
+      const fastFallback = await fastExtract(
+        { content: visibleText, interactive: [] },
+        instruction,
+        null
+      );
+      if (fastFallback && isExtractionValid(fastFallback)) return fastFallback;
+    }
+  } catch {}
+
+  // Guard: Never allow an unscoped fallback (which builds 20,000+ token trees and times out)
+  return "";
 }
 
 /** Check if extraction result is empty/trivial or just element IDs. */
@@ -183,7 +253,15 @@ export async function fastUrlQuestion(
 
   console.log(`   🔍 Extracting: "${question}"`);
   if (onStep) onStep({ step: 2, title, url, action: `Extract: "${question}"` });
-  const extracted = await extractText(sh, question, page);
+  let extracted = await tryDirectAtsFetch(url);
+  if (!extracted) {
+    const atsLink = await findAtsUrlOnPage(page);
+    if (atsLink) extracted = await tryDirectAtsFetch(atsLink);
+  }
+  if (!extracted) {
+    extracted = await extractText(sh, question, page);
+  }
+
 
   if (!isExtractionValid(extracted)) {
     console.log(`\n⚠️ Extraction returned empty/minimal data from this page.`);
@@ -233,7 +311,14 @@ export async function runAgent(
   onStep?: AgentStepCallback
 ): Promise<string | undefined> {
   console.log(`\n🤖 Agent: "${goal}"\n`);
+  resetSessionMetrics();
   const history: string[] = [];
+  const actionRecords: Array<{
+    action: string;
+    url: string;
+    instruction?: string;
+    empty?: boolean;
+  }> = [];
   let answer: string | undefined;
   let lastActionKey = "";
 
@@ -251,8 +336,11 @@ export async function runAgent(
     try {
       const heuristic = await tryHeuristic(page, goal, url, history);
       if (heuristic) {
+        sessionMetrics.tier0++;
+        sessionMetrics.tokensSaved += 600;
         console.log(`   ${heuristic.description}`);
         history.push(heuristic.description);
+        actionRecords.push({ action: "heuristic", url, instruction: heuristic.description });
         if (onStep) {
           const screenshot = await captureScreenshotBase64(page);
           onStep({
@@ -266,6 +354,7 @@ export async function runAgent(
         }
         if (heuristic.doneMessage) {
           console.log(`\n🎉 ${heuristic.doneMessage}\n`);
+          logSessionMetrics();
           // Auto-learn from this page
           const capturedUrls = Array.from(
             (getCapturedApiData() || "").matchAll(/\[([^\]]+)\]:/g)
@@ -280,7 +369,7 @@ export async function runAgent(
       // Heuristic failure is non-fatal — fall through to planner
     }
 
-    // ─── TIER 1: Playbook / Site Memory Check ───
+    // ─── TIER 1: Playbook / Site Memory Check & Master ATS Archetype Direct API ───
     try {
       const domain = normalizeDomain(url);
       const pb = playbooks.get(domain);
@@ -288,7 +377,59 @@ export async function runAgent(
         // Check if any captured API data matches known endpoints
         const apiData = getCapturedApiData();
         if (apiData && apiData.length > 100) {
+          sessionMetrics.tier1++;
+          sessionMetrics.tokensSaved += 500;
           console.log(`   📚 Playbook hit: ${domain} (${pb.endpoints.length} known endpoints, archetype: ${pb.archetypeId || "none"})`);
+        }
+      }
+
+      // Master ATS Archetype Direct API Fetch (Ashby, Greenhouse, Lever)
+      // When on an ATS domain OR on a careers page that embeds/links to an ATS:
+      let directAtsJobs: string | null = null;
+      let targetAtsUrl: string | null = null;
+
+      if (/ashbyhq\.com|greenhouse\.io|lever\.co/i.test(url)) {
+        targetAtsUrl = url;
+      } else if (
+        /careers?|jobs?|openings/i.test(url) ||
+        /careers?|jobs?|openings|roles?|hiring|engineer|developer/i.test(goal)
+      ) {
+        targetAtsUrl = await findAtsUrlOnPage(page);
+      }
+
+      if (targetAtsUrl) {
+        directAtsJobs = await tryDirectAtsFetch(targetAtsUrl);
+      }
+
+      if (directAtsJobs && directAtsJobs.length > 20) {
+        sessionMetrics.tier1++;
+        sessionMetrics.tokensSaved += 2500;
+        const jobCount = directAtsJobs.split("\n").length;
+        console.log(`   ⚡ Master ATS Archetype hit: Direct API fetched ${jobCount} listings (<200ms, 0 DOM tokens)`);
+        pinLatestExtraction(directAtsJobs, url);
+
+        const syn = await synthesize(goal, directAtsJobs, url, true);
+        if (syn?.answer && (syn.isComplete || step >= cfg.agent.maxSteps - 1)) {
+          answer = syn.answer;
+          session.lastAnswer = answer;
+          console.log(`\n📢 Answer:\n${answer}\n`);
+          addToConversation({ role: "assistant", content: answer, label: "answer" });
+          session.history.push({ ts: ts(), url, goal, result: answer.slice(0, 2000) });
+          console.log(`🎉 Goal completed via ATS Direct API Fast-Path!\n`);
+          logSessionMetrics();
+          if (onStep) {
+            const screenshot = await captureScreenshotBase64(page);
+            onStep({
+              step,
+              maxSteps: cfg.agent.maxSteps,
+              title,
+              url,
+              plan: { action: "done", message: answer },
+              result: answer,
+              screenshot,
+            });
+          }
+          return answer;
         }
       }
     } catch {
@@ -296,15 +437,71 @@ export async function runAgent(
     }
 
     // ─── TIER 2: Distilled LLM Planner ───
-    // Distill page for planner context (~20ms in-browser)
-    const distilled = await distillPage(page);
-    const apiData = getCapturedApiData();
-    const snapshot = buildPlannerSnapshot(distilled, apiData);
-    if (distilled.interactive.length > 0 || distilled.content.length > 50) {
-      console.log(`   📄 Distilled: ${distilled.interactive.length} elements, ~${Math.round(distilled.content.length / 4)} tokens`);
+    let snapshot = "";
+
+
+    // Dedicated Google SERP handling: AI Overview / Featured Snippet check & clean organic results
+    if (url.includes("google.com/search")) {
+      const serp = await distillGoogleSearch(page);
+
+      // Path A: Opportunistic check — does AI Overview or Featured Snippet directly answer the goal?
+      if (serp.aiOverview && serp.aiOverview.length > 60) {
+        process.stdout.write(`   ⚡ Checking Google direct answer / AI Overview...\r`);
+        const answerCandidate = await fastExtract(
+          { content: serp.aiOverview, interactive: [] },
+          `Does this information factually answer: "${goal}"? If so, extract the complete answer. If visiting the company or destination website is still required, return empty string.`,
+          null
+        );
+        if (answerCandidate && isExtractionValid(answerCandidate)) {
+          const syn = await synthesize(goal, answerCandidate, url, true);
+          if (syn?.isComplete && syn.answer) {
+            sessionMetrics.tier0++;
+            sessionMetrics.tokensSaved += 800;
+            console.log(`\n🎉 Answered via Google direct answer!\n`);
+            console.log(`📢 Answer:\n${syn.answer}\n`);
+            logSessionMetrics();
+            session.lastAnswer = syn.answer;
+            addToConversation({ role: "assistant", content: syn.answer, label: "answer" });
+            session.history.push({ ts: ts(), url, goal, result: syn.answer.slice(0, 2000) });
+            if (onStep) {
+              const screenshot = await captureScreenshotBase64(page);
+              onStep({
+                step,
+                maxSteps: cfg.agent.maxSteps,
+                title,
+                url,
+                plan: { action: "done", message: syn.answer },
+                result: syn.answer,
+                screenshot,
+              });
+            }
+            return syn.answer;
+          }
+        }
+      }
+
+      // Path B: Only feed Title + Clean Target URL to the planner snapshot (slashes ~800 tokens to ~120)
+      if (serp.results.length > 0) {
+        snapshot =
+          `=== GOOGLE SEARCH RESULTS ===\n` +
+          serp.results.map((r) => `[${r.index}] "${r.title}" -> ${r.url}`).join("\n") +
+          `\n\nInstruction: Choose the best organic result link. You can navigate directly using {"action":"navigate","url":"<URL>"} or click its title.`;
+        console.log(`   📄 Distilled Google SERP: ${serp.results.length} clean organic results (~${Math.round(snapshot.length / 4)} tokens)`);
+      }
+    }
+
+    if (!snapshot) {
+      // Distill page for planner context (~20ms in-browser)
+      const distilled = await distillPage(page);
+      const apiData = getCapturedApiData();
+      snapshot = buildPlannerSnapshot(distilled, apiData);
+      if (distilled.interactive.length > 0 || distilled.content.length > 50) {
+        console.log(`   📄 Distilled: ${distilled.interactive.length} elements, ~${Math.round(distilled.content.length / 4)} tokens`);
+      }
     }
 
     process.stdout.write(`   🤔 Planning...\r`);
+    sessionMetrics.tier2++;
 
     let plan: any;
     try {
@@ -347,12 +544,14 @@ export async function runAgent(
     const actionKey = `${plan.action}:${plan.instruction || plan.url || ""}`;
     if (actionKey === lastActionKey && plan.action !== "done" && plan.action !== "wait") {
       console.log(`⚠️ Loop detected (same action repeated). Stopping.`);
+      logSessionMetrics();
       return undefined;
     }
     lastActionKey = actionKey;
 
     if (plan.action === "done") {
       console.log(`\n🎉 ${plan.message || "Done!"}\n`);
+      logSessionMetrics();
       if (onStep) {
         const screenshot = await captureScreenshotBase64(page);
         onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan, result: plan.message || "Done", screenshot });
@@ -363,6 +562,7 @@ export async function runAgent(
     if (plan.action === "wait") {
       const ms = Math.min(plan.ms || 2000, 10000);
       console.log(`   ⏳ Waiting ${ms}ms...`);
+      actionRecords.push({ action: "wait", url });
       if (onStep) onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan });
       await sleep(ms);
       history.push(`Waited ${ms}ms`);
@@ -374,6 +574,7 @@ export async function runAgent(
       if (!/^https?:\/\//i.test(target)) target = "https://" + target;
       console.log(`   🌐 ${target}`);
       history.push(`Nav → ${target}`);
+      actionRecords.push({ action: "navigate", url: target });
       if (onStep) onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan });
       try {
         await navigate(page, target);
@@ -388,6 +589,7 @@ export async function runAgent(
     if (plan.action === "act") {
       console.log(`   ⚡ "${plan.instruction}"`);
       history.push(`Act: "${plan.instruction}"`);
+      actionRecords.push({ action: "act", instruction: plan.instruction, url });
       if (onStep) onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan });
       try {
         const r = await retry(() => sh.act(plan.instruction, { page }), "Act");
@@ -404,6 +606,102 @@ export async function runAgent(
     }
 
     if (plan.action === "extract") {
+      // ─── ANTI-REPEAT "ACTION DEDUP" CIRCUIT BREAKER ───
+      // If previous action was extract on the exact same page with empty/failed return:
+      const prevAction = actionRecords[actionRecords.length - 1];
+      const isConsecutiveEmptyExtract =
+        prevAction?.action === "extract" &&
+        prevAction.empty &&
+        prevAction.url === url;
+
+      if (isConsecutiveEmptyExtract) {
+        console.log(`   🔁 Repetitive extraction failure detected on ${url}. Activating circuit breaker.`);
+
+        // Step A: Check for ATS link or direct ATS API
+        const atsLink = await findAtsUrlOnPage(page);
+        if (atsLink) {
+          console.log(`   ⚡ Circuit breaker found ATS link: ${atsLink}`);
+          const directData = await tryDirectAtsFetch(atsLink);
+          if (directData && directData.length > 20) {
+            sessionMetrics.tier1++;
+            sessionMetrics.tokensSaved += 2000;
+            console.log(`   🚀 Direct ATS API fetched (${directData.split("\n").length} jobs)!`);
+            pinLatestExtraction(directData, url);
+            const syn = await synthesize(goal, directData, url, true);
+            if (syn?.answer) {
+              answer = syn.answer;
+              session.lastAnswer = answer;
+              console.log(`\n📢 Answer:\n${answer}\n`);
+              addToConversation({ role: "assistant", content: answer, label: "answer" });
+              session.history.push({ ts: ts(), url, goal, result: answer.slice(0, 2000) });
+              console.log(`🎉 Goal completed via Circuit Breaker ATS Fast-Path!\n`);
+              logSessionMetrics();
+              if (onStep) {
+                const screenshot = await captureScreenshotBase64(page);
+                onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan: { action: "done", message: answer }, result: answer, screenshot });
+              }
+              return answer;
+            }
+          }
+
+          // If direct API didn't return data, navigate directly to the ATS board
+          console.log(`   🌐 Navigating directly to ATS board: ${atsLink}`);
+          actionRecords.push({ action: "navigate", url: atsLink });
+          history.push(`Circuit breaker navigated to ATS: ${atsLink}`);
+          if (onStep) onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan: { action: "navigate", url: atsLink } });
+          try {
+            await navigate(page, atsLink);
+            await dismissCookies(sh, page);
+          } catch {}
+          continue;
+        }
+
+        // Step B: Check for navigation/career links on the page to click or navigate to
+        const nextLink = await page.evaluate(() => {
+          const links = Array.from(document.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+          for (const l of links) {
+            const href = l.href;
+            const text = (l.innerText || "").toLowerCase();
+            if (
+              (href.includes("/jobs") || href.includes("/careers") || href.includes("/openings")) &&
+              !href.includes("#") &&
+              href !== window.location.href
+            ) {
+              return href;
+            }
+            if (
+              text.includes("view open") ||
+              text.includes("see open") ||
+              text.includes("open roles") ||
+              text.includes("current openings")
+            ) {
+              return href;
+            }
+          }
+          return null;
+        }).catch(() => null);
+
+        if (nextLink && nextLink !== url) {
+          console.log(`   🌐 Circuit breaker navigating to discovered link: ${nextLink}`);
+          actionRecords.push({ action: "navigate", url: nextLink });
+          history.push(`Circuit breaker navigated to: ${nextLink}`);
+          if (onStep) onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan: { action: "navigate", url: nextLink } });
+          try {
+            await navigate(page, nextLink);
+            await dismissCookies(sh, page);
+          } catch {}
+          continue;
+        }
+
+        // Step C: Scroll heuristic to trigger dynamic rendering
+        console.log(`   📜 Circuit breaker scrolling page to reveal dynamic content...`);
+        await page.evaluate(() => window.scrollBy(0, 1000)).catch(() => {});
+        await sleep(1000);
+        history.push(`Circuit breaker scrolled page`);
+        actionRecords.push({ action: "act", instruction: "scroll", url });
+        continue;
+      }
+
       console.log(`   🔍 "${plan.instruction}"`);
       if (onStep) onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan });
       try {
@@ -413,9 +711,11 @@ export async function runAgent(
         if (!isExtractionValid(text)) {
           console.log(`   ⚠️ Extraction returned empty, trivial, or element ID data.`);
           history.push(`Extract returned minimal/element-ID data for "${plan.instruction}" on ${url}. Need to click into a specific result link to visit the destination site.`);
+          actionRecords.push({ action: "extract", instruction: plan.instruction, url, empty: true });
           continue;
         }
 
+        actionRecords.push({ action: "extract", instruction: plan.instruction, url, empty: false });
         console.log(`\n📄 Extracted:\n${text}\n`);
         pinLatestExtraction(text, url);
 
@@ -429,6 +729,7 @@ export async function runAgent(
           addToConversation({ role: "assistant", content: answer, label: "answer" });
           session.history.push({ ts: ts(), url, goal, result: answer.slice(0, 2000) });
           console.log(`🎉 Goal completed!\n`);
+          logSessionMetrics();
           if (onStep) {
             const screenshot = await captureScreenshotBase64(page);
             onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan, result: answer, screenshot });
@@ -449,9 +750,11 @@ export async function runAgent(
       } catch (e: any) {
         console.warn(`   ⚠️ ${e?.message}`);
         history.push(`Extract failed: ${e?.message}`);
+        actionRecords.push({ action: "extract", instruction: plan.instruction, url, empty: true });
       }
       continue;
     }
+
   }
 
   // Auto-learn from page even if we didn't fully complete
@@ -466,6 +769,7 @@ export async function runAgent(
     }
   } catch {}
 
+  logSessionMetrics();
   return answer;
 }
 

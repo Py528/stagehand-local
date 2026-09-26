@@ -709,6 +709,183 @@ export async function tryDirectApiFetch(
 }
 
 /* ══════════════════════════════════════════════════════════════
+   Master Archetype: ATS Direct API Fast-Path (Tier 1)
+
+   Modern ATS providers expose public REST endpoints. When an ATS
+   URL or script is detected, fetch the listings directly via HTTP
+   bypassing DOM rendering and prompt generation completely.
+   ══════════════════════════════════════════════════════════════ */
+
+/**
+ * Direct API fetch for modern ATS providers (Ashby, Greenhouse, Lever).
+ * Drops entire ATS visit from 3 browser actions + 1 extract to a single ~150ms HTTP fetch.
+ */
+export async function tryDirectAtsFetch(url: string): Promise<string | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url.startsWith("http") ? url : `https://${url}`);
+  } catch {
+    return null;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  const pathname = parsed.pathname;
+
+  // 1. Ashby: https://api.ashbyhq.com/posting-api/job-board/{company}
+  // URL examples: jobs.ashbyhq.com/Roboflow, ashbyhq.com/Roboflow/some-job-id
+  if (hostname.includes("ashbyhq.com")) {
+    const parts = pathname.split("/").filter(Boolean);
+    const org = parts[0];
+    if (org && !["api", "job", "embed"].includes(org.toLowerCase())) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        const res = await fetch(`https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(org)}`, {
+          signal: controller.signal,
+          headers: { Accept: "application/json" },
+        });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const data = (await res.json()) as any;
+          if (Array.isArray(data?.jobs) && data.jobs.length > 0) {
+            return data.jobs
+              .map((j: any) => {
+                const dept = j.department || j.departmentName || "";
+                const loc = j.location || j.locationName || "";
+                const isRemote = j.isRemote === true;
+                const wp = j.workplaceType || (isRemote ? "Remote" : "");
+                const remoteStr = isRemote ? "Remote: true" : (j.isRemote === false ? "Remote: false" : "");
+                const details = [
+                  dept ? `Dept: ${dept}` : "",
+                  loc ? `Location: ${loc}` : "",
+                  wp ? `Workplace: ${wp}` : "",
+                  remoteStr,
+                ].filter(Boolean).join(" | ");
+                return `- ${j.title}${details ? ` | ${details}` : ""}`;
+              })
+              .join("\n");
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // 2. Greenhouse: https://boards-api.greenhouse.io/v1/boards/{company}/jobs
+  // URL examples: boards.greenhouse.io/figma, job-boards.greenhouse.io/figma
+  if (hostname.includes("greenhouse.io")) {
+    const parts = pathname.split("/").filter(Boolean);
+    const orgParam = parsed.searchParams.get("for");
+    const org = orgParam || (parts[0] && !["embed", "search"].includes(parts[0].toLowerCase()) ? parts[0] : null);
+    if (org) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(org)}/jobs`, {
+          signal: controller.signal,
+          headers: { Accept: "application/json" },
+        });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const data = (await res.json()) as any;
+          if (Array.isArray(data?.jobs) && data.jobs.length > 0) {
+            return data.jobs
+              .map((j: any) => {
+                const dept = j.departments?.[0]?.name || "";
+                const loc = j.location?.name || "";
+                const details = [
+                  dept ? `Dept: ${dept}` : "",
+                  loc ? `Location: ${loc}` : "",
+                ].filter(Boolean).join(" | ");
+                return `- ${j.title}${details ? ` | ${details}` : ""}`;
+              })
+              .join("\n");
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // 3. Lever: https://api.lever.co/v0/postings/{company}?mode=json
+  // URL examples: jobs.lever.co/spotify, jobs.lever.co/spotify/job-id
+  if (hostname.includes("lever.co")) {
+    const parts = pathname.split("/").filter(Boolean);
+    const org = parts[0];
+    if (org && !["api", "search"].includes(org.toLowerCase())) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        const res = await fetch(`https://api.lever.co/v0/postings/${encodeURIComponent(org)}?mode=json`, {
+          signal: controller.signal,
+          headers: { Accept: "application/json" },
+        });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const data = (await res.json()) as any;
+          if (Array.isArray(data) && data.length > 0) {
+            return data
+              .map((j: any) => {
+                const title = j.text || j.title || "";
+                const dept = j.categories?.department || j.categories?.team || "";
+                const loc = j.categories?.location || "";
+                const wp = j.workplaceType || "";
+                const details = [
+                  dept ? `Dept: ${dept}` : "",
+                  loc ? `Location: ${loc}` : "",
+                  wp ? `Workplace: ${wp}` : "",
+                ].filter(Boolean).join(" | ");
+                return `- ${title}${details ? ` | ${details}` : ""}`;
+              })
+              .join("\n");
+          }
+        }
+      } catch {}
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Scan current page for links or iframes pointing to supported ATS providers.
+ */
+export async function findAtsUrlOnPage(page: any): Promise<string | null> {
+  try {
+    return await page.evaluate(() => {
+      // 1. Check anchor tags
+      const links = Array.from(document.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+      for (const a of links) {
+        const href = a.href || "";
+        if (
+          href.includes("jobs.ashbyhq.com/") ||
+          href.includes("ashbyhq.com/") ||
+          href.includes("boards.greenhouse.io/") ||
+          href.includes("job-boards.greenhouse.io/") ||
+          href.includes("jobs.lever.co/")
+        ) {
+          return href;
+        }
+      }
+      // 2. Check iframes
+      const iframes = Array.from(document.querySelectorAll("iframe[src]")) as HTMLIFrameElement[];
+      for (const f of iframes) {
+        const src = f.src || "";
+        if (
+          src.includes("ashbyhq.com") ||
+          src.includes("greenhouse.io") ||
+          src.includes("lever.co")
+        ) {
+          return src;
+        }
+      }
+      return null;
+    });
+  } catch {
+    return null;
+  }
+}
+
+
+/* ══════════════════════════════════════════════════════════════
    Auto-Learn After Navigation
 
    Called after the agent successfully navigates and completes

@@ -235,7 +235,60 @@ async function tryMediaControl(
 }
 
 /**
- * On YouTube search results, click the first video.
+ * Extract YouTube search query from natural language goals like:
+ * "could you play the video of crown? on youtube from txt?"
+ * "play crown by txt on youtube"
+ * "watch bohemian rhapsody on youtube"
+ */
+export function parseYouTubeSearchQuery(goal: string): string | null {
+  const clean = goal.replace(/[?!.]/g, "").trim();
+
+  // Pattern 1: play ... on youtube from/by ...
+  let m = clean.match(/(?:play|watch|listen\s+to|open)\s+(?:the\s+)?(?:video\s+(?:of\s+)?|song\s+(?:of\s+)?|track\s+(?:of\s+)?)?(.+?)\s+on\s+youtube\s+(?:from|by)\s+(.+)/i);
+  if (m && m[1] && m[2]) return `${m[1].trim()} ${m[2].trim()}`;
+
+  // Pattern 2: play ... by/from ... on youtube
+  m = clean.match(/(?:play|watch|listen\s+to|open)\s+(?:the\s+)?(?:video\s+(?:of\s+)?|song\s+(?:of\s+)?|track\s+(?:of\s+)?)?(.+?)\s+(?:by|from)\s+(.+?)\s+on\s+youtube/i);
+  if (m && m[1] && m[2]) return `${m[1].trim()} ${m[2].trim()}`;
+
+  // Pattern 3: on youtube ... play ...
+  m = clean.match(/on\s+youtube\s+(?:play|watch|search\s+for|find|open)\s+(.+)/i);
+  if (m && m[1]) return m[1].trim();
+
+  // Pattern 4: play ... on youtube
+  m = clean.match(/(?:play|watch|listen\s+to|open|search\s+for|find)\s+(?:the\s+)?(?:video\s+(?:of\s+)?|song\s+(?:of\s+)?|track\s+(?:of\s+)?)?(.+?)\s+on\s+youtube/i);
+  if (m && m[1]) return m[1].trim();
+
+  // Pattern 5: youtube <query> or search youtube <query>
+  m = clean.match(/^(?:search\s+youtube\s+(?:for\s+)?|youtube\s+(?:search\s+(?:for\s+)?|for\s+)?)(.+)/i);
+  if (m && m[1]) return m[1].trim();
+
+  return null;
+}
+
+/**
+ * Extract meaningful entity keywords from goal (removes common stopwords).
+ */
+export function extractSignificantKeywords(text: string): string[] {
+  const stopWords = new Set([
+    "a", "an", "the", "and", "or", "of", "to", "in", "on", "at", "by", "for",
+    "with", "about", "from", "as", "into", "like", "through", "after", "over",
+    "between", "out", "against", "during", "without", "before", "under", "around",
+    "among", "could", "would", "should", "you", "me", "we", "us", "please", "can",
+    "play", "watch", "open", "find", "search", "video", "song", "music", "youtube",
+    "official", "mv", "audio", "track", "listen", "show", "tell", "it", "this", "that"
+  ]);
+
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !stopWords.has(w));
+}
+
+/**
+ * On YouTube search results, rank all videos by goal keyword relevance
+ * and click the best match (or top result if no specific tie-breaker).
  */
 async function tryYouTubeFirstVideoClick(
   page: any,
@@ -253,92 +306,249 @@ async function tryYouTubeFirstVideoClick(
       lower.includes("open") ||
       lower.includes("video") ||
       lower.includes("song") ||
-      lower.includes("music")
+      lower.includes("music") ||
+      lower.includes("listen")
     )
   )
     return null;
 
-  // Try clicking the first video title link
-  const clicked = await page.evaluate(() => {
-    // Primary selector: video renderer title link
-    const selectors = [
-      "ytd-video-renderer a#video-title",
-      "ytd-video-renderer h3 a",
-      "#contents ytd-video-renderer a#thumbnail",
-    ];
-    for (const sel of selectors) {
-      const el = document.querySelector(sel) as HTMLElement | null;
-      if (el) {
-        el.click();
-        return true;
+  const keywords = extractSignificantKeywords(goal);
+
+  // Evaluate all video renderers on the page and rank by keyword match
+  const clickResult = await page.evaluate((kws: string[]) => {
+    const renderers = Array.from(document.querySelectorAll("ytd-video-renderer"));
+    if (!renderers.length) {
+      const fallback = document.querySelector("a#video-title, h3 a") as HTMLElement | null;
+      if (fallback) {
+        fallback.click();
+        return { clicked: true, title: fallback.innerText || "", score: 0 };
+      }
+      return null;
+    }
+
+    let bestEl: HTMLElement | null = null;
+    let bestScore = -1;
+    let bestTitle = "";
+
+    for (const r of renderers) {
+      const titleLink = r.querySelector("a#video-title") as HTMLAnchorElement | null;
+      if (!titleLink) continue;
+
+      const titleText = (titleLink.innerText || titleLink.getAttribute("title") || "").toLowerCase();
+      const channelEl = r.querySelector("#channel-name, ytd-channel-name");
+      const channelText = (channelEl as HTMLElement)?.innerText?.toLowerCase() || "";
+      const fullText = `${titleText} ${channelText}`;
+
+      // Calculate keyword score
+      let score = 0;
+      for (const kw of kws) {
+        if (fullText.includes(kw)) score += 2;
+        if (titleText.includes(kw)) score += 1;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestEl = titleLink;
+        bestTitle = titleLink.innerText || titleLink.getAttribute("title") || "";
       }
     }
-    return false;
-  }).catch(() => false);
 
-  if (clicked) {
-    await sleep(1500); // Wait for navigation
+    if (!bestEl && renderers.length > 0) {
+      const fallbackLink = renderers[0]?.querySelector("a#video-title") as HTMLElement | null;
+      if (fallbackLink) {
+        bestEl = fallbackLink;
+        bestTitle = fallbackLink.innerText || fallbackLink.getAttribute("title") || "";
+      }
+    }
+
+
+    if (bestEl) {
+      bestEl.click();
+      return { clicked: true, title: bestTitle, score: bestScore };
+    }
+    return null;
+  }, keywords).catch(() => null);
+
+  if (clickResult?.clicked) {
+    await sleep(2000); // Wait for navigation
+    const desc = clickResult.title
+      ? `⚡ Heuristic: Clicked YouTube video: "${clickResult.title.slice(0, 60)}"`
+      : `⚡ Heuristic: Clicked best-matching YouTube video result`;
     return {
-      description: "⚡ Heuristic: Clicked first YouTube video result",
-      continueLoop: true, // Let planner confirm it's playing and report "done"
+      description: desc,
+      continueLoop: true, // Let next step confirm playback on the watch page
     };
   }
   return null;
 }
 
 /**
- * On Google search results, click the first organic result.
- * Only triggers when the goal implies navigating INTO a result (not just reading snippets).
+ * On YouTube watch page, check if the loaded video matches the requested goal.
+ * If so, ensure playback and complete the goal immediately.
+ * If the current video is not a match but a sidebar video is, click the sidebar video.
  */
-async function tryGoogleFirstResultClick(
+async function tryYouTubeWatchPageCheck(
+  page: any,
+  goal: string,
+  url: string
+): Promise<HeuristicResult | null> {
+  if (!url.includes("youtube.com/watch")) return null;
+
+  const lower = goal.toLowerCase();
+  const isPlayRequest =
+    lower.includes("play") ||
+    lower.includes("watch") ||
+    lower.includes("listen") ||
+    lower.includes("open");
+
+  if (!isPlayRequest) return null;
+
+  const keywords = extractSignificantKeywords(goal);
+
+  const status = await page.evaluate((kws: string[]) => {
+    const video = document.querySelector("video") as HTMLVideoElement | null;
+    const titleEl = document.querySelector("h1.ytd-watch-metadata, #title h1, ytd-watch-metadata h1");
+    const videoTitle = (titleEl as HTMLElement)?.innerText || document.title || "";
+    const channelEl = document.querySelector("#channel-name, ytd-channel-name");
+    const channelName = (channelEl as HTMLElement)?.innerText || "";
+    const fullText = `${videoTitle} ${channelName}`.toLowerCase();
+
+    // Check how many keywords match
+    const matchCount = kws.filter((kw) => fullText.includes(kw)).length;
+    const isMatch = kws.length <= 1 ? matchCount >= 1 : matchCount >= Math.min(2, kws.length);
+
+    if (isMatch && video) {
+      if (video.paused) {
+        video.play().catch(() => {});
+      }
+      return { matched: true, title: videoTitle.replace(/\s*-\s*YouTube.*$/i, "").trim() };
+    }
+
+    // Check if a sidebar recommended video is a better match
+    const compacts = Array.from(document.querySelectorAll("ytd-compact-video-renderer"));
+    for (const c of compacts) {
+      const cTitle = (c.querySelector("#video-title") as HTMLElement)?.innerText || "";
+      const cChannel = (c.querySelector("#channel-name") as HTMLElement)?.innerText || "";
+      const cText = `${cTitle} ${cChannel}`.toLowerCase();
+      const cMatches = kws.filter((kw) => cText.includes(kw)).length;
+      if (cMatches > matchCount && cMatches >= Math.min(2, kws.length)) {
+        const link = c.querySelector("a#thumbnail, a#video-title") as HTMLElement | null;
+        if (link) {
+          link.click();
+          return { clickedSidebar: true, title: cTitle };
+        }
+      }
+    }
+
+    if (video && video.paused) {
+      video.play().catch(() => {});
+    }
+
+    return { matched: isMatch, title: videoTitle.replace(/\s*-\s*YouTube.*$/i, "").trim() };
+  }, keywords).catch(() => null);
+
+  if (status?.matched) {
+    await sleep(500);
+    return {
+      description: `⚡ Heuristic: Verified playback of "${status.title.slice(0, 50)}"`,
+      doneMessage: `Now playing "${status.title}" on YouTube.`,
+    };
+  }
+
+  if (status?.clickedSidebar) {
+    await sleep(2000);
+    return {
+      description: `⚡ Heuristic: Clicked matching sidebar video: "${status.title.slice(0, 50)}"`,
+      continueLoop: true,
+    };
+  }
+
+  return null;
+}
+
+
+/**
+ * Tier 0: Google SERP Fast-Hop
+ *
+ * Completely bypasses the LLM planner on Google Search result pages:
+ * 1. Checks for an immediate visible direct answer (Featured Snippet / description box).
+ *    If present and factual, marks step resolved immediately.
+ * 2. Otherwise, finds the first clean organic result link:
+ *    page.locator('#search a[href^="http"]:not([href*="google.com"])').first()
+ * 3. Navigates directly via page.goto(href) or click.
+ * 4. Returns continueLoop: true so the planner loop completely bypasses the LLM on SERP.
+ */
+async function tryGoogleSearchFastHop(
   page: any,
   goal: string,
   url: string
 ): Promise<HeuristicResult | null> {
   if (!url.includes("google.com/search")) return null;
 
-  // Only click through if goal implies we need to visit the actual site
-  const lower = goal.toLowerCase();
-  const deepNavKeywords = [
-    "career",
-    "job",
-    "hiring",
-    "pricing",
-    "contact",
-    "documentation",
-    "docs",
-    "open roles",
-    "remote",
-    "apply",
-    "features",
-    "download",
-  ];
-  if (!deepNavKeywords.some((kw) => lower.includes(kw))) return null;
-
-  const clicked = await page.evaluate(() => {
-    // Google organic result links
-    const selectors = [
-      "#search a[data-ved][href]:not([href*='google.com'])",
-      "#rso a[href]:not([href*='google.com'])",
-      ".g a[href]:not([href*='google.com'])",
-    ];
-    for (const sel of selectors) {
-      const el = document.querySelector(sel) as HTMLAnchorElement | null;
-      if (el && el.href && !el.href.includes("google.com")) {
-        el.click();
-        return el.href;
+  // 1. Check for immediate, visible direct answer
+  const directAnswer = await page
+    .evaluate(() => {
+      const answerEl = document.querySelector(
+        'div[data-attrid="wa:/description"], div.LGOjhe, [data-async-context*="overview"]'
+      );
+      if (answerEl) {
+        const text = (answerEl as HTMLElement).innerText?.trim();
+        if (text && text.length > 50) return text;
       }
-    }
-    return null;
-  }).catch(() => null);
+      return null;
+    })
+    .catch(() => null);
 
-  if (clicked) {
-    await sleep(2000); // Wait for navigation
-    return {
-      description: `⚡ Heuristic: Clicked first Google result → ${clicked}`,
-      continueLoop: true,
-    };
+  // If a direct answer exists and goal is simple factual inquiry
+  if (directAnswer) {
+    const isFactual = /what is|who is|when was|where is|definition|how many|rate|price/i.test(goal);
+    if (isFactual) {
+      return {
+        description: `⚡ Heuristic: Found immediate Google direct answer`,
+        doneMessage: directAnswer,
+      };
+    }
   }
+
+  // 2. Locate first clean organic result link and fast-hop
+  try {
+    const targetHref = await page
+      .evaluate(() => {
+        // Look for organic search result cards with an h3 heading
+        const links = document.querySelectorAll(
+          '#search a[href]:not([href*="google.com"]), #rso a[href]:not([href*="google.com"]), div.g a[href]:not([href*="google.com"])'
+        );
+        for (const link of Array.from(links)) {
+          const href = (link as HTMLAnchorElement).href;
+          if (!href || !href.startsWith("http") || href.includes("google.com")) continue;
+          // Verify it's an organic card with a visible h3
+          const hasH3 =
+            link.querySelector("h3") ||
+            link.closest("div.g, div[data-hveid]")?.querySelector("h3");
+          if (hasH3) return href;
+        }
+        // Fallback: first external link in the main search container
+        for (const link of Array.from(links)) {
+          const href = (link as HTMLAnchorElement).href;
+          if (href && href.startsWith("http") && !href.includes("google.com")) {
+            return href;
+          }
+        }
+        return null;
+      })
+      .catch(() => null);
+
+    if (targetHref && targetHref.startsWith("http")) {
+      console.log(`   🌐 Heuristic Fast-Hop: Navigating directly to ${targetHref}`);
+      await page.goto(targetHref).catch(() => {});
+      await sleep(1500);
+      return {
+        description: `⚡ Heuristic: Fast-hop into first organic Google result → ${targetHref}`,
+        continueLoop: true,
+      };
+    }
+  } catch {}
+
   return null;
 }
 
@@ -364,7 +574,7 @@ async function trySemanticNavigation(
 
   const selectorMap: Record<SemanticTarget, string> = {
     careers:
-      'a[href*="career" i], a[href*="jobs" i], a[href*="job-openings" i], a[href*="join" i], a[href*="hiring" i], a[href*="lever.co" i], a[href*="greenhouse.io" i], a[href*="ashbyhq.com" i]',
+      'a[href*="ashbyhq.com" i], a[href*="greenhouse.io" i], a[href*="lever.co" i], a[href*="workday.com" i], a[href*="career" i], a[href*="jobs" i], a[href*="job-openings" i], a[href*="join" i], a[href*="hiring" i]',
     pricing: 'a[href*="pricing" i], a[href*="plans" i]',
     contact: 'a[href*="contact" i], a[href*="support" i]',
     docs: 'a[href*="docs" i], a[href*="documentation" i], a[href*="developer" i], a[href*="api" i]',
@@ -423,19 +633,36 @@ export async function tryHeuristic(
   _history: string[]
 ): Promise<HeuristicResult | null> {
   try {
-    // 1. Media player control (highest priority — zero ambiguity)
+    // 0. From about:blank, navigate directly to YouTube search if intent is to play/watch on YouTube
+    if (url === "about:blank" || url.startsWith("about:")) {
+      const ytQuery = parseYouTubeSearchQuery(goal);
+      if (ytQuery) {
+        const targetUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(ytQuery)}`;
+        await page.goto(targetUrl).catch(() => {});
+        return {
+          description: `⚡ Heuristic: Navigated directly to YouTube search for "${ytQuery}"`,
+          continueLoop: true,
+        };
+      }
+    }
+
+    // 1. YouTube watch page: check if requested video is already loaded & playing
+    const ytWatch = await tryYouTubeWatchPageCheck(page, goal, url);
+    if (ytWatch) return ytWatch;
+
+    // 2. Media player control (skip, pause, play, mute, fullscreen)
     const media = await tryMediaControl(page, goal, url);
     if (media) return media;
 
-    // 2. YouTube search results → first video click
+    // 3. YouTube search results → rank & click best matching video
     const ytClick = await tryYouTubeFirstVideoClick(page, goal, url);
     if (ytClick) return ytClick;
 
-    // 3. Google search results → first organic click (for deep-nav goals)
-    const googleClick = await tryGoogleFirstResultClick(page, goal, url);
-    if (googleClick) return googleClick;
+    // 4. Google search results → Fast-Hop (bypasses LLM on SERP)
+    const googleHop = await tryGoogleSearchFastHop(page, goal, url);
+    if (googleHop) return googleHop;
 
-    // 4. Semantic subpage navigation (careers, pricing, etc.)
+    // 5. Semantic subpage navigation (careers, pricing, etc.)
     const semantic = await trySemanticNavigation(page, goal, url);
     if (semantic) return semantic;
   } catch {
@@ -444,3 +671,4 @@ export async function tryHeuristic(
 
   return null;
 }
+

@@ -1,7 +1,33 @@
 import { cfg } from "./config.js";
 import { isNearDuplicate, withTimeout } from "./utils.js";
 import { readFileContent } from "./files.js";
-import type { ConversationEntry, SessionState } from "./types.js";
+import type { ConversationEntry, SessionState, SessionMetrics } from "./types.js";
+
+export const sessionMetrics: SessionMetrics = {
+  tier0: 0,
+  tier1: 0,
+  tier2: 0,
+  tokensSaved: 0,
+};
+
+let metricsLogged = false;
+
+export function resetSessionMetrics(): void {
+  sessionMetrics.tier0 = 0;
+  sessionMetrics.tier1 = 0;
+  sessionMetrics.tier2 = 0;
+  sessionMetrics.tokensSaved = 0;
+  metricsLogged = false;
+}
+
+export function logSessionMetrics(): void {
+  if (metricsLogged) return;
+  metricsLogged = true;
+  const skipped = sessionMetrics.tier0 + sessionMetrics.tier1;
+  console.log(
+    `📊 [Execution Stats] Tier 0 (Heuristic): ${sessionMetrics.tier0} | Tier 1 (Playbook): ${sessionMetrics.tier1} | Tier 2 (LLM): ${sessionMetrics.tier2} | LLM Calls Skipped: ${skipped}`
+  );
+}
 
 export const session: SessionState = {
   lastExtraction: "",
@@ -10,6 +36,7 @@ export const session: SessionState = {
   batchResults: [],
   history: [],
   attachedFiles: [],
+  metrics: sessionMetrics,
 };
 
 /** Add an entry to the conversation buffer, trimming unpinned entries to stay under contextWindowChars. */

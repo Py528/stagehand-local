@@ -4,8 +4,10 @@ import { isNetworkOrCdpError } from "./src/utils.js";
 import { createStagehandModelHandler } from "./src/llm.js";
 import { runCommand, startInteractiveCli, printHelp } from "./src/cli.js";
 import { startWebServer } from "./src/server.js";
+import { setupRouteBlocking } from "./src/browser.js";
 
 async function main() {
+
   const args = process.argv.slice(2);
 
   if (args.includes("--help") || args.includes("-h")) {
@@ -61,7 +63,9 @@ async function main() {
       model: createStagehandModelHandler(),
       logging: { level: "warn" },
     });
+    await setupRouteBlocking(browser.context);
   } catch (err: any) {
+
     console.error("❌ Initialization error:", err?.message || err);
     process.exit(isNetworkOrCdpError(err) ? 2 : 1);
   }

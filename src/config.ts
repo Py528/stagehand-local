@@ -35,7 +35,7 @@ export const DEFAULT_CONFIG: Config = {
     apiKey: "not-needed",
     modelId: "unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ4_XS",
     temperature: 0.1,
-    stepTimeoutMs: 90000,
+    stepTimeoutMs: 120000,
   },
   browser: {
     headless: false,
@@ -51,7 +51,7 @@ export const DEFAULT_CONFIG: Config = {
   },
   shortcuts: {
     youtube: "https://www.youtube.com/results?search_query={{query}}",
-    google: "https://www.google.com/search?q={{query}}",
+    google: "https://www.google.com/search?q={{query}}&hl=en",
     github: "https://github.com/search?q={{query}}&type=repositories",
     hn: "https://hn.algolia.com/?q={{query}}",
     npm: "https://www.npmjs.com/search?q={{query}}",

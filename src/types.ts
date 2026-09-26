@@ -58,6 +58,13 @@ export interface HistoryEntry {
   result: string;
 }
 
+export interface SessionMetrics {
+  tier0: number;
+  tier1: number;
+  tier2: number;
+  tokensSaved: number;
+}
+
 export interface SessionState {
   lastExtraction: string;
   lastAnswer: string;
@@ -65,6 +72,7 @@ export interface SessionState {
   batchResults: BatchResult[];
   history: HistoryEntry[];
   attachedFiles: AttachedFile[];
+  metrics?: SessionMetrics;
 }
 
 export type PlanAction =
