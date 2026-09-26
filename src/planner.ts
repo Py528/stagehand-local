@@ -27,6 +27,7 @@ import {
   distillGoogleSearch,
 } from "./distill.js";
 import { tryHeuristic } from "./heuristics.js";
+import { compileGoal, type ExecutionPlan } from "./compiler.js";
 import { playbooks, autoLearnFromPage, tryDirectAtsFetch, findAtsUrlOnPage } from "./playbook.js";
 
 export const PLANNER_PROMPT = `You are an autonomous web agent planner controlling a browser.
@@ -312,6 +313,25 @@ export async function runAgent(
 ): Promise<string | undefined> {
   console.log(`\n🤖 Agent: "${goal}"\n`);
   resetSessionMetrics();
+
+  // ─── TIER 0: Compile Goal Contract at t=0 (<300ms) ───
+  let compiledPlan: ExecutionPlan | null = null;
+  try {
+    compiledPlan = await compileGoal(goal);
+    if (compiledPlan && compiledPlan.primaryQuery) {
+      const extra = [
+        compiledPlan.targetName ? `Target: "${compiledPlan.targetName}"` : "",
+        compiledPlan.creatorOrOrg ? `By: "${compiledPlan.creatorOrOrg}"` : "",
+        compiledPlan.timeOffsetSeconds ? `Offset: ${compiledPlan.timeOffsetSeconds}s` : "",
+      ]
+        .filter(Boolean)
+        .join(", ");
+      console.log(`   🎯 Goal Plan [t=0]: Service=${compiledPlan.service} | Query="${compiledPlan.primaryQuery}"${extra ? ` (${extra})` : ""}`);
+    }
+  } catch {
+    // Non-fatal fallback
+  }
+
   const history: string[] = [];
   const actionRecords: Array<{
     action: string;
@@ -334,7 +354,7 @@ export async function runAgent(
 
     // ─── TIER 0: Zero-LLM Heuristic Fast-Paths (<100ms, 0 tokens) ───
     try {
-      const heuristic = await tryHeuristic(page, goal, url, history);
+      const heuristic = await tryHeuristic(page, goal, url, history, compiledPlan || undefined);
       if (heuristic) {
         sessionMetrics.tier0++;
         sessionMetrics.tokensSaved += 600;
@@ -587,6 +607,19 @@ export async function runAgent(
     }
 
     if (plan.action === "act") {
+      const lowerInstruction = (plan.instruction || "").toLowerCase();
+
+      // State Gate: Disallow media seeking/skipping on search result pages
+      if (
+        (url.includes("youtube.com/results") || url.includes("google.com/search")) &&
+        (lowerInstruction.includes("skip") || lowerInstruction.includes("seek") || lowerInstruction.includes("fast forward"))
+      ) {
+        console.log(`   ⛔ State Gate: Prevented seek/skip act on search results page. Selecting target card instead.`);
+        const clickResult = await tryHeuristic(page, goal, url, history, compiledPlan || undefined);
+        if (clickResult?.continueLoop) continue;
+        if (clickResult?.doneMessage) return clickResult.doneMessage;
+      }
+
       console.log(`   ⚡ "${plan.instruction}"`);
       history.push(`Act: "${plan.instruction}"`);
       actionRecords.push({ action: "act", instruction: plan.instruction, url });

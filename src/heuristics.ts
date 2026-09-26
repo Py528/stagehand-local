@@ -12,11 +12,15 @@
  *  5. Common form fills (search box on arbitrary sites)
  */
 
+import MiniSearch from "minisearch";
 import { sleep } from "./utils.js";
+import { navigate } from "./browser.js";
+import { fastCompileGoal, type ExecutionPlan } from "./compiler.js";
 
 /* ══════════════════════════════════════════════════════════════
    Types
    ══════════════════════════════════════════════════════════════ */
+
 
 export interface HeuristicResult {
   /** Human-readable description of what the heuristic did (for history log). */
@@ -142,46 +146,154 @@ function parseSemanticNavTarget(instruction: string): SemanticTarget | null {
    Heuristic Handlers
    ══════════════════════════════════════════════════════════════ */
 
+export function parseYouTubeSearchQuery(goal: string): string | null {
+  const plan = fastCompileGoal(goal);
+  if (plan?.service === "youtube" && plan.primaryQuery) {
+    return plan.primaryQuery;
+  }
+  const lower = goal.toLowerCase();
+  if (lower.includes("youtube") || lower.includes("play ") || lower.includes("watch ")) {
+    const clean = goal
+      .replace(/^(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:play|watch|open)\s+(?:the\s+)?(?:video\s+of\s+|song\s+of\s+)?/i, "")
+      .replace(/\s+on\s+youtube.*$/i, "")
+      .replace(/[?!.]/g, "")
+      .trim();
+    return clean || null;
+  }
+  return null;
+}
+
+/**
+ * Candidate video card extracted from search results page.
+ */
+export interface SearchCardCandidate {
+  index: number;
+  title: string;
+  url?: string | undefined;
+}
+
+/**
+ * Evaluates candidate cards on the page and clicks the one with the highest BM25/Fuzzy score.
+ * Never clicks .first() blindly.
+ */
+export async function clickBestMatchingCard(
+  page: any,
+  containerSelector: string,
+  titleSelector: string,
+  query: string
+): Promise<{ clicked: boolean; title?: string; targetIndex: number }> {
+  // 1. Scrape candidate titles and indices directly in-browser (<15ms)
+  const candidates: SearchCardCandidate[] = await page.evaluate(
+    ({ containerSelector, titleSelector }: { containerSelector: string; titleSelector: string }) => {
+      const cards = Array.from(document.querySelectorAll(containerSelector));
+      const list: SearchCardCandidate[] = [];
+
+      cards.slice(0, 15).forEach((card, idx) => {
+        const titleEl = card.querySelector(titleSelector) as HTMLElement | null;
+        const anchorEl = (card.tagName.toLowerCase() === "a" ? card : card.querySelector("a")) as HTMLAnchorElement | null;
+        const channelEl = card.querySelector("#channel-name, ytd-channel-name") as HTMLElement | null;
+        const channelText = channelEl?.innerText?.trim() || "";
+        const titleText = titleEl?.textContent?.trim() || titleEl?.getAttribute("title") || "";
+        if (titleText) {
+          list.push({
+            index: idx,
+            title: channelText ? `${titleText} by ${channelText}` : titleText,
+            url: anchorEl?.href || undefined,
+          });
+        }
+      });
+      return list;
+    },
+    { containerSelector, titleSelector }
+  ).catch(() => []);
+
+  if (candidates.length === 0) return { clicked: false, targetIndex: -1 };
+
+  // 2. Index candidates with MiniSearch in-memory
+  const ms = new MiniSearch<SearchCardCandidate>({
+    fields: ["title"],
+    storeFields: ["index", "title", "url"],
+    searchOptions: {
+      fuzzy: 0.2,
+      prefix: true,
+      boost: { title: 2 },
+    },
+  });
+  ms.addAll(candidates);
+
+  // Clean query: drop common stop-words
+  const cleanQuery = query
+    .replace(/[^\w\s]/gi, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !["play", "video", "song", "watch", "find", "the", "by", "from", "on", "youtube"].includes(w.toLowerCase()))
+    .join(" ");
+
+  const searchResults = ms.search(cleanQuery);
+
+  // Determine target index: take top-scored result if score > 0, otherwise fallback to 0
+  const targetIndex = searchResults.length > 0 ? (searchResults[0] as any).index : 0;
+  const bestCandidate = candidates.find((c) => c.index === targetIndex);
+  const bestTitle = bestCandidate?.title || "";
+
+  // 3. Click the verified candidate index directly
+  const clicked = await page.evaluate(
+    ({ containerSelector, titleSelector, targetIndex }: { containerSelector: string; titleSelector: string; targetIndex: number }) => {
+      const cards = Array.from(document.querySelectorAll(containerSelector));
+      const targetCard = cards[targetIndex];
+      if (!targetCard) return false;
+
+      const clickTarget = (targetCard.querySelector(titleSelector) || targetCard.querySelector("a") || targetCard) as HTMLElement;
+      if (clickTarget) {
+        clickTarget.click();
+        return true;
+      }
+      return false;
+    },
+    { containerSelector, titleSelector, targetIndex }
+  ).catch(() => false);
+
+  if (clicked) {
+    // Wait for the URL transition to avoid CDP detachment
+    await page.waitForURL(/.*watch\?v=.*/, { timeout: 6000 }).catch(() => {});
+    await sleep(1500);
+  }
+
+  return { clicked, title: bestTitle, targetIndex };
+}
+
 /**
  * Handle media playback controls on the current page.
- * Works on YouTube watch pages and any page with an HTML5 <video> element.
+ * Works strictly on YouTube watch pages and any page with a primary HTML5 <video> element.
  */
 async function tryMediaControl(
   page: any,
   goal: string,
   url: string
 ): Promise<HeuristicResult | null> {
-  const intent = parseMediaIntent(goal);
-  if (!intent) return null;
+  // STATE GATE 1: Never seek or skip on search results pages!
+  if (url.includes("youtube.com/results") || url.includes("google.com/search")) {
+    return null;
+  }
 
+  // STATE GATE 2: Seeking/skipping is strictly gated to watch pages
   const isVideoPage =
     url.includes("youtube.com/watch") ||
     url.includes("vimeo.com/") ||
-    url.includes("dailymotion.com/video");
+    url.includes("dailymotion.com/video") ||
+    url.includes("/video/");
 
-  // Only try media controls if we're on a video page or there's a <video> tag
-  if (!isVideoPage) {
-    const hasVideo = await page
-      .evaluate(() => !!document.querySelector("video"))
-      .catch(() => false);
-    if (!hasVideo) return null;
-  }
+  if (!isVideoPage) return null;
+
+  const intent = parseMediaIntent(goal);
+  if (!intent) return null;
 
   switch (intent.action) {
     case "skip": {
       const sec = intent.seconds || 30;
-      if (url.includes("youtube.com/watch")) {
-        // YouTube-specific: use keyboard shortcut or direct currentTime
-        await page.evaluate((s: number) => {
-          const v = document.querySelector("video") as HTMLVideoElement | null;
-          if (v) v.currentTime += s;
-        }, sec);
-      } else {
-        await page.evaluate((s: number) => {
-          const v = document.querySelector("video") as HTMLVideoElement | null;
-          if (v) v.currentTime += s;
-        }, sec);
-      }
+      await page.evaluate((s: number) => {
+        const v = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
+        if (v) v.currentTime += s;
+      }, sec).catch(() => {});
       return {
         description: `⚡ Heuristic: Skipped ${sec}s ahead in video`,
         doneMessage: `Skipped ${sec} seconds ahead in the video.`,
@@ -190,16 +302,16 @@ async function tryMediaControl(
 
     case "pause":
       await page.evaluate(() => {
-        const v = document.querySelector("video") as HTMLVideoElement | null;
+        const v = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
         if (v) v.pause();
-      });
+      }).catch(() => {});
       return { description: `⚡ Heuristic: Paused video`, doneMessage: "Video paused." };
 
     case "play":
       await page.evaluate(() => {
-        const v = document.querySelector("video") as HTMLVideoElement | null;
-        if (v) v.play();
-      });
+        const v = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
+        if (v) v.play().catch(() => {});
+      }).catch(() => {});
       return {
         description: `⚡ Heuristic: Resumed playback`,
         doneMessage: "Video is now playing.",
@@ -207,16 +319,16 @@ async function tryMediaControl(
 
     case "mute":
       await page.evaluate(() => {
-        const v = document.querySelector("video") as HTMLVideoElement | null;
+        const v = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
         if (v) v.muted = true;
-      });
+      }).catch(() => {});
       return { description: `⚡ Heuristic: Muted video`, doneMessage: "Video muted." };
 
     case "unmute":
       await page.evaluate(() => {
-        const v = document.querySelector("video") as HTMLVideoElement | null;
+        const v = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
         if (v) v.muted = false;
-      });
+      }).catch(() => {});
       return {
         description: `⚡ Heuristic: Unmuted video`,
         doneMessage: "Video unmuted.",
@@ -224,9 +336,9 @@ async function tryMediaControl(
 
     case "fullscreen":
       await page.evaluate(() => {
-        const v = document.querySelector("video") as HTMLVideoElement | null;
+        const v = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
         if (v) v.requestFullscreen?.();
-      });
+      }).catch(() => {});
       return {
         description: `⚡ Heuristic: Entered fullscreen`,
         doneMessage: "Video is now fullscreen.",
@@ -235,162 +347,47 @@ async function tryMediaControl(
 }
 
 /**
- * Extract YouTube search query from natural language goals like:
- * "could you play the video of crown? on youtube from txt?"
- * "play crown by txt on youtube"
- * "watch bohemian rhapsody on youtube"
- */
-export function parseYouTubeSearchQuery(goal: string): string | null {
-  const clean = goal.replace(/[?!.]/g, "").trim();
-
-  // Pattern 1: play ... on youtube from/by ...
-  let m = clean.match(/(?:play|watch|listen\s+to|open)\s+(?:the\s+)?(?:video\s+(?:of\s+)?|song\s+(?:of\s+)?|track\s+(?:of\s+)?)?(.+?)\s+on\s+youtube\s+(?:from|by)\s+(.+)/i);
-  if (m && m[1] && m[2]) return `${m[1].trim()} ${m[2].trim()}`;
-
-  // Pattern 2: play ... by/from ... on youtube
-  m = clean.match(/(?:play|watch|listen\s+to|open)\s+(?:the\s+)?(?:video\s+(?:of\s+)?|song\s+(?:of\s+)?|track\s+(?:of\s+)?)?(.+?)\s+(?:by|from)\s+(.+?)\s+on\s+youtube/i);
-  if (m && m[1] && m[2]) return `${m[1].trim()} ${m[2].trim()}`;
-
-  // Pattern 3: on youtube ... play ...
-  m = clean.match(/on\s+youtube\s+(?:play|watch|search\s+for|find|open)\s+(.+)/i);
-  if (m && m[1]) return m[1].trim();
-
-  // Pattern 4: play ... on youtube
-  m = clean.match(/(?:play|watch|listen\s+to|open|search\s+for|find)\s+(?:the\s+)?(?:video\s+(?:of\s+)?|song\s+(?:of\s+)?|track\s+(?:of\s+)?)?(.+?)\s+on\s+youtube/i);
-  if (m && m[1]) return m[1].trim();
-
-  // Pattern 5: youtube <query> or search youtube <query>
-  m = clean.match(/^(?:search\s+youtube\s+(?:for\s+)?|youtube\s+(?:search\s+(?:for\s+)?|for\s+)?)(.+)/i);
-  if (m && m[1]) return m[1].trim();
-
-  return null;
-}
-
-/**
- * Extract meaningful entity keywords from goal (removes common stopwords).
- */
-export function extractSignificantKeywords(text: string): string[] {
-  const stopWords = new Set([
-    "a", "an", "the", "and", "or", "of", "to", "in", "on", "at", "by", "for",
-    "with", "about", "from", "as", "into", "like", "through", "after", "over",
-    "between", "out", "against", "during", "without", "before", "under", "around",
-    "among", "could", "would", "should", "you", "me", "we", "us", "please", "can",
-    "play", "watch", "open", "find", "search", "video", "song", "music", "youtube",
-    "official", "mv", "audio", "track", "listen", "show", "tell", "it", "this", "that"
-  ]);
-
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !stopWords.has(w));
-}
-
-/**
- * On YouTube search results, rank all videos by goal keyword relevance
- * and click the best match (or top result if no specific tie-breaker).
+ * On YouTube search results, rank all videos by goal keyword relevance / BM25
+ * and click the best match (never blindly clicks .first()).
  */
 async function tryYouTubeFirstVideoClick(
   page: any,
   goal: string,
-  url: string
+  url: string,
+  plan?: ExecutionPlan
 ): Promise<HeuristicResult | null> {
   if (!url.includes("youtube.com/results")) return null;
 
-  const lower = goal.toLowerCase();
-  if (
-    !(
-      lower.includes("play") ||
-      lower.includes("click") ||
-      lower.includes("watch") ||
-      lower.includes("open") ||
-      lower.includes("video") ||
-      lower.includes("song") ||
-      lower.includes("music") ||
-      lower.includes("listen")
-    )
-  )
-    return null;
+  const query = plan?.primaryQuery || goal;
+  const res = await clickBestMatchingCard(
+    page,
+    "ytd-video-renderer, ytd-rich-item-renderer",
+    "a#video-title, #video-title, #video-title-link",
+    query
+  );
 
-  const keywords = extractSignificantKeywords(goal);
-
-  // Evaluate all video renderers on the page and rank by keyword match
-  const clickResult = await page.evaluate((kws: string[]) => {
-    const renderers = Array.from(document.querySelectorAll("ytd-video-renderer"));
-    if (!renderers.length) {
-      const fallback = document.querySelector("a#video-title, h3 a") as HTMLElement | null;
-      if (fallback) {
-        fallback.click();
-        return { clicked: true, title: fallback.innerText || "", score: 0 };
-      }
-      return null;
-    }
-
-    let bestEl: HTMLElement | null = null;
-    let bestScore = -1;
-    let bestTitle = "";
-
-    for (const r of renderers) {
-      const titleLink = r.querySelector("a#video-title") as HTMLAnchorElement | null;
-      if (!titleLink) continue;
-
-      const titleText = (titleLink.innerText || titleLink.getAttribute("title") || "").toLowerCase();
-      const channelEl = r.querySelector("#channel-name, ytd-channel-name");
-      const channelText = (channelEl as HTMLElement)?.innerText?.toLowerCase() || "";
-      const fullText = `${titleText} ${channelText}`;
-
-      // Calculate keyword score
-      let score = 0;
-      for (const kw of kws) {
-        if (fullText.includes(kw)) score += 2;
-        if (titleText.includes(kw)) score += 1;
-      }
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestEl = titleLink;
-        bestTitle = titleLink.innerText || titleLink.getAttribute("title") || "";
-      }
-    }
-
-    if (!bestEl && renderers.length > 0) {
-      const fallbackLink = renderers[0]?.querySelector("a#video-title") as HTMLElement | null;
-      if (fallbackLink) {
-        bestEl = fallbackLink;
-        bestTitle = fallbackLink.innerText || fallbackLink.getAttribute("title") || "";
-      }
-    }
-
-
-    if (bestEl) {
-      bestEl.click();
-      return { clicked: true, title: bestTitle, score: bestScore };
-    }
-    return null;
-  }, keywords).catch(() => null);
-
-  if (clickResult?.clicked) {
-    await sleep(2000); // Wait for navigation
-    const desc = clickResult.title
-      ? `⚡ Heuristic: Clicked YouTube video: "${clickResult.title.slice(0, 60)}"`
+  if (res.clicked) {
+    const desc = res.title
+      ? `⚡ Heuristic: Ranked and clicked best YouTube result: "${res.title.slice(0, 60)}"`
       : `⚡ Heuristic: Clicked best-matching YouTube video result`;
     return {
       description: desc,
       continueLoop: true, // Let next step confirm playback on the watch page
     };
   }
+
   return null;
 }
 
 /**
  * On YouTube watch page, check if the loaded video matches the requested goal.
- * If so, ensure playback and complete the goal immediately.
- * If the current video is not a match but a sidebar video is, click the sidebar video.
+ * If so, ensure playback, apply any time offset (e.g. skip to 1 min), and complete the goal.
  */
 async function tryYouTubeWatchPageCheck(
   page: any,
   goal: string,
-  url: string
+  url: string,
+  plan?: ExecutionPlan
 ): Promise<HeuristicResult | null> {
   if (!url.includes("youtube.com/watch")) return null;
 
@@ -399,72 +396,56 @@ async function tryYouTubeWatchPageCheck(
     lower.includes("play") ||
     lower.includes("watch") ||
     lower.includes("listen") ||
-    lower.includes("open");
+    lower.includes("open") ||
+    plan?.intent === "media_play";
 
   if (!isPlayRequest) return null;
 
-  const keywords = extractSignificantKeywords(goal);
+  const targetPlan = plan || fastCompileGoal(goal);
+  const targetSeconds = targetPlan?.timeOffsetSeconds ?? null;
+  const isAbsolute = targetPlan?.isAbsoluteSeek ?? true;
 
-  const status = await page.evaluate((kws: string[]) => {
-    const video = document.querySelector("video") as HTMLVideoElement | null;
-    const titleEl = document.querySelector("h1.ytd-watch-metadata, #title h1, ytd-watch-metadata h1");
-    const videoTitle = (titleEl as HTMLElement)?.innerText || document.title || "";
-    const channelEl = document.querySelector("#channel-name, ytd-channel-name");
-    const channelName = (channelEl as HTMLElement)?.innerText || "";
-    const fullText = `${videoTitle} ${channelName}`.toLowerCase();
+  const status = await page.evaluate(
+    ({ targetSeconds, isAbsolute }: { targetSeconds: number | null; isAbsolute: boolean }) => {
+      const video = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
+      const titleEl = document.querySelector("h1.ytd-watch-metadata, #title h1, ytd-watch-metadata h1");
+      const videoTitle = (titleEl as HTMLElement)?.innerText || document.title || "";
 
-    // Check how many keywords match
-    const matchCount = kws.filter((kw) => fullText.includes(kw)).length;
-    const isMatch = kws.length <= 1 ? matchCount >= 1 : matchCount >= Math.min(2, kws.length);
-
-    if (isMatch && video) {
-      if (video.paused) {
-        video.play().catch(() => {});
-      }
-      return { matched: true, title: videoTitle.replace(/\s*-\s*YouTube.*$/i, "").trim() };
-    }
-
-    // Check if a sidebar recommended video is a better match
-    const compacts = Array.from(document.querySelectorAll("ytd-compact-video-renderer"));
-    for (const c of compacts) {
-      const cTitle = (c.querySelector("#video-title") as HTMLElement)?.innerText || "";
-      const cChannel = (c.querySelector("#channel-name") as HTMLElement)?.innerText || "";
-      const cText = `${cTitle} ${cChannel}`.toLowerCase();
-      const cMatches = kws.filter((kw) => cText.includes(kw)).length;
-      if (cMatches > matchCount && cMatches >= Math.min(2, kws.length)) {
-        const link = c.querySelector("a#thumbnail, a#video-title") as HTMLElement | null;
-        if (link) {
-          link.click();
-          return { clickedSidebar: true, title: cTitle };
+      if (video) {
+        if (targetSeconds !== null && targetSeconds > 0) {
+          if (isAbsolute) {
+            video.currentTime = targetSeconds;
+          } else {
+            video.currentTime += targetSeconds;
+          }
         }
+        if (video.paused) {
+          video.play().catch(() => {});
+        }
+        return {
+          matched: true,
+          title: videoTitle.replace(/\s*-\s*YouTube.*$/i, "").trim(),
+          currentTime: Math.round(video.currentTime),
+        };
       }
-    }
 
-    if (video && video.paused) {
-      video.play().catch(() => {});
-    }
-
-    return { matched: isMatch, title: videoTitle.replace(/\s*-\s*YouTube.*$/i, "").trim() };
-  }, keywords).catch(() => null);
+      return { matched: false, title: videoTitle };
+    },
+    { targetSeconds, isAbsolute }
+  ).catch(() => null);
 
   if (status?.matched) {
     await sleep(500);
+    const timeNote = targetSeconds !== null ? ` at ${status.currentTime}s` : "";
     return {
-      description: `⚡ Heuristic: Verified playback of "${status.title.slice(0, 50)}"`,
-      doneMessage: `Now playing "${status.title}" on YouTube.`,
-    };
-  }
-
-  if (status?.clickedSidebar) {
-    await sleep(2000);
-    return {
-      description: `⚡ Heuristic: Clicked matching sidebar video: "${status.title.slice(0, 50)}"`,
-      continueLoop: true,
+      description: `⚡ Heuristic: Verified playback of "${status.title.slice(0, 50)}"${timeNote}`,
+      doneMessage: `Now playing "${status.title}" on YouTube${timeNote}.`,
     };
   }
 
   return null;
 }
+
 
 
 /**
@@ -630,15 +611,22 @@ export async function tryHeuristic(
   page: any,
   goal: string,
   url: string,
-  _history: string[]
+  _history: string[],
+  plan?: ExecutionPlan
 ): Promise<HeuristicResult | null> {
   try {
+    const effectivePlan = plan || fastCompileGoal(goal);
+
     // 0. From about:blank, navigate directly to YouTube search if intent is to play/watch on YouTube
     if (url === "about:blank" || url.startsWith("about:")) {
-      const ytQuery = parseYouTubeSearchQuery(goal);
+      const ytQuery =
+        effectivePlan?.service === "youtube" && effectivePlan.primaryQuery
+          ? effectivePlan.primaryQuery
+          : parseYouTubeSearchQuery(goal);
+
       if (ytQuery) {
         const targetUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(ytQuery)}`;
-        await page.goto(targetUrl).catch(() => {});
+        await navigate(page, targetUrl).catch(() => {});
         return {
           description: `⚡ Heuristic: Navigated directly to YouTube search for "${ytQuery}"`,
           continueLoop: true,
@@ -646,16 +634,16 @@ export async function tryHeuristic(
       }
     }
 
-    // 1. YouTube watch page: check if requested video is already loaded & playing
-    const ytWatch = await tryYouTubeWatchPageCheck(page, goal, url);
+    // 1. YouTube watch page: check if requested video is already loaded & playing (and apply time offset)
+    const ytWatch = await tryYouTubeWatchPageCheck(page, goal, url, effectivePlan || undefined);
     if (ytWatch) return ytWatch;
 
-    // 2. Media player control (skip, pause, play, mute, fullscreen)
+    // 2. Media player control (skip, pause, play, mute, fullscreen - strictly gated to watch page)
     const media = await tryMediaControl(page, goal, url);
     if (media) return media;
 
     // 3. YouTube search results → rank & click best matching video
-    const ytClick = await tryYouTubeFirstVideoClick(page, goal, url);
+    const ytClick = await tryYouTubeFirstVideoClick(page, goal, url, effectivePlan || undefined);
     if (ytClick) return ytClick;
 
     // 4. Google search results → Fast-Hop (bypasses LLM on SERP)
