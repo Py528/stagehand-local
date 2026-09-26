@@ -381,59 +381,103 @@ async function tryYouTubeFirstVideoClick(
 
 /**
  * Invariant 1: Delta-State Verified YouTube Ad Skipper
- * Runs a tight internal poll (costs 0 planner steps) and only returns true
- * when .ad-showing is verified false on a fresh DOM read.
+ * Runs a tight internal poll (costs 0 planner steps) and only returns "clean"
+ * when active ad states (.ad-showing / .ad-interrupting) are verified false on a fresh DOM read.
+ * Never returns "clean" on evaluate failures or timeouts.
  */
-export async function skipYouTubeAdWithVerification(page: any, maxWaitMs = 12000): Promise<boolean> {
+export async function skipYouTubeAdWithVerification(
+  page: any,
+  maxWaitMs = 15000
+): Promise<"clean" | "timeout"> {
   const start = Date.now();
 
   while (Date.now() - start < maxWaitMs) {
     const state = await page.evaluate(() => {
-      const adShowing = !!document.querySelector(
-        ".ad-showing, .ad-interrupting, .ytp-ad-player-overlay, .video-ads .ytp-ad-module"
-      );
-      const skipBtn = document.querySelector(
-        ".ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, button.ytp-ad-skip-button"
-      ) as HTMLElement | null;
-      const skipBtnEnabled = !!(skipBtn && !skipBtn.hasAttribute("disabled") && skipBtn.offsetParent !== null);
-      return { adShowing, skipBtnEnabled };
-    }).catch(() => ({ adShowing: false, skipBtnEnabled: false }));
+      const player = document.getElementById("movie_player") as any;
+      const isPlayerAd = player
+        ? player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting")
+        : false;
+      const hasAdClass = !!document.querySelector(".ad-showing, .ad-interrupting");
+      const isAdData = player?.getVideoData?.()?.isAd === true;
 
-    if (!state.adShowing) {
-      return true; // Genuinely verified gone
+      const adShowing = isPlayerAd || hasAdClass || isAdData;
+
+      if (!adShowing) {
+        return { adShowing: false, skipClicked: false };
+      }
+
+      // Check for active skip buttons across modern YouTube variants
+      const skipSelectors = [
+        ".ytp-skip-ad-button",
+        ".ytp-ad-skip-button",
+        ".ytp-ad-skip-button-modern",
+        "button.ytp-ad-skip-button",
+        "button.ytp-ad-skip-button-modern",
+        '[id^="skip-button"] button',
+        ".ytp-ad-skip-button-container button",
+        ".ytp-ad-skip-button-slot button",
+        'button[class*="skip"]',
+        ".ytp-ad-overlay-close-button",
+      ];
+      const candidates = Array.from(
+        document.querySelectorAll(skipSelectors.join(", "))
+      ) as HTMLElement[];
+
+      const skipBtn = candidates.find((btn) => {
+        const visible = btn.offsetParent !== null || btn.offsetWidth > 0 || btn.offsetHeight > 0;
+        const enabled = !btn.hasAttribute("disabled") && btn.getAttribute("aria-disabled") !== "true";
+        return visible && enabled;
+      });
+
+      if (skipBtn) {
+        skipBtn.click();
+        skipBtn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+        if (player && typeof player.skipAd === "function") {
+          try { player.skipAd(); } catch {}
+        }
+        return { adShowing: true, skipClicked: true };
+      }
+
+      // Try fast-forwarding unskippable short ad videos
+      const adVideo = document.querySelector(".ad-showing video, video.html5-main-video") as HTMLVideoElement | null;
+      if (adVideo && isFinite(adVideo.duration) && adVideo.duration > 0 && adVideo.duration <= 35) {
+        try {
+          adVideo.currentTime = adVideo.duration;
+        } catch {}
+      }
+
+      return { adShowing: true, skipClicked: false };
+    }).catch(() => null);
+
+    if (state === null) {
+      // Evaluate failed (frame transition/detach) — wait and retry, don't conclude clean
+      await sleep(500);
+      continue;
     }
 
-    if (state.skipBtnEnabled) {
-      await page.evaluate(() => {
-        const btn = document.querySelector(
-          ".ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, button.ytp-ad-skip-button"
-        ) as HTMLElement | null;
-        btn?.click();
-        const player = document.getElementById("movie_player") as any;
-        if (player?.skipAd) player.skipAd();
-      }).catch(() => {});
+    if (!state.adShowing) {
+      return "clean"; // Genuinely verified gone
+    }
 
+    if (state.skipClicked) {
       await sleep(600); // Give the click time to register and state to flip
       continue;
     }
 
-    // Try fast-forwarding unskippable ad
-    await page.evaluate(() => {
-      const adVideo = document.querySelector(".ad-showing video, video.html5-main-video") as HTMLVideoElement | null;
-      if (adVideo && isFinite(adVideo.duration) && adVideo.duration > 0 && adVideo.duration <= 30) {
-        adVideo.currentTime = adVideo.duration;
-      }
-    }).catch(() => {});
-
     await sleep(800); // Wait for countdown to tick down
   }
 
-  // Final verification check
+  // Final verification check — evaluate failure must return false (timeout, not clean)
   const isGone = await page.evaluate(() => {
-    return !document.querySelector(".ad-showing, .ad-interrupting, .ytp-ad-player-overlay");
-  }).catch(() => true);
+    const player = document.getElementById("movie_player") as any;
+    const isPlayerAd = player
+      ? player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting")
+      : false;
+    const hasAdClass = !!document.querySelector(".ad-showing, .ad-interrupting");
+    return !isPlayerAd && !hasAdClass;
+  }).catch(() => false);
 
-  return isGone;
+  return isGone ? "clean" : "timeout";
 }
 
 /**
@@ -530,8 +574,8 @@ async function tryYouTubeWatchPageCheck(
   const isAbsolute = targetPlan?.isAbsoluteSeek ?? true;
 
   // 1. Invariant 1: Delta-State Verified Ad Skip (tight internal poll, 0 planner steps)
-  const adClean = await skipYouTubeAdWithVerification(page, 10000);
-  if (!adClean) {
+  const adResult = await skipYouTubeAdWithVerification(page, 15000);
+  if (adResult !== "clean") {
     return {
       description: `⚡ Heuristic: Video pre-roll ad in progress, waiting for stream...`,
       continueLoop: true,

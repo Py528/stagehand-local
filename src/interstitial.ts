@@ -23,10 +23,11 @@ export interface BlockerStatus {
  */
 export async function detectBlockingElement(page: any): Promise<BlockerStatus> {
   return await page.evaluate(() => {
-    // Check for YouTube / HTML5 video ads first
-    const isVideoAd = !!document.querySelector(
-      ".ad-showing, .ad-interrupting, .ytp-ad-player-overlay, ytd-action-companion-ad-renderer, .video-ads"
-    );
+    // Check for active video ads (ad-showing / ad-interrupting on player)
+    const player = document.getElementById("movie_player") as any;
+    const isVideoAd = player
+      ? player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting")
+      : !!document.querySelector(".ad-showing, .ad-interrupting");
 
     // 1. Check what element sits at the center of the viewport
     const centerX = window.innerWidth / 2;
@@ -146,9 +147,10 @@ export async function waitOutCountdown(page: any, maxWaitMs = 8000): Promise<boo
 export async function trySkipVideoAd(page: any): Promise<boolean> {
   return await page.evaluate(() => {
     // Check if on video ad
-    const adShowing = !!document.querySelector(
-      ".ad-showing, .ad-interrupting, .ytp-ad-player-overlay, .video-ads"
-    );
+    const player = document.getElementById("movie_player") as any;
+    const adShowing = player
+      ? player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting")
+      : !!document.querySelector(".ad-showing, .ad-interrupting");
     if (!adShowing) return false;
 
     // Try YouTube skip button
@@ -162,7 +164,6 @@ export async function trySkipVideoAd(page: any): Promise<boolean> {
     }
 
     // Try player API skip or mute
-    const player = document.getElementById("movie_player") as any;
     if (player?.skipAd) {
       try {
         player.skipAd();
