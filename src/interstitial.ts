@@ -303,6 +303,13 @@ export async function surgicallyRemoveBlocker(page: any): Promise<boolean> {
  */
 export async function handleInterstitials(page: any): Promise<{ handled: boolean; action?: string }> {
   try {
+    const currentUrl = await page.url().catch(() => "");
+    // YouTube watch page has its own dedicated, verified player heuristic (tryYouTubeWatchPageCheck).
+    // Avoid running generic modal dismissal or Escape presses that can pause or dismiss the YouTube player.
+    if (currentUrl.includes("youtube.com/watch")) {
+      return { handled: false };
+    }
+
     const status = await detectBlockingElement(page);
     if (!status.isBlocked) return { handled: false };
 

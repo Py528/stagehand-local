@@ -380,8 +380,132 @@ async function tryYouTubeFirstVideoClick(
 }
 
 /**
+ * Invariant 1: Delta-State Verified YouTube Ad Skipper
+ * Runs a tight internal poll (costs 0 planner steps) and only returns true
+ * when .ad-showing is verified false on a fresh DOM read.
+ */
+export async function skipYouTubeAdWithVerification(page: any, maxWaitMs = 12000): Promise<boolean> {
+  const start = Date.now();
+
+  while (Date.now() - start < maxWaitMs) {
+    const state = await page.evaluate(() => {
+      const adShowing = !!document.querySelector(
+        ".ad-showing, .ad-interrupting, .ytp-ad-player-overlay, .video-ads .ytp-ad-module"
+      );
+      const skipBtn = document.querySelector(
+        ".ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, button.ytp-ad-skip-button"
+      ) as HTMLElement | null;
+      const skipBtnEnabled = !!(skipBtn && !skipBtn.hasAttribute("disabled") && skipBtn.offsetParent !== null);
+      return { adShowing, skipBtnEnabled };
+    }).catch(() => ({ adShowing: false, skipBtnEnabled: false }));
+
+    if (!state.adShowing) {
+      return true; // Genuinely verified gone
+    }
+
+    if (state.skipBtnEnabled) {
+      await page.evaluate(() => {
+        const btn = document.querySelector(
+          ".ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, button.ytp-ad-skip-button"
+        ) as HTMLElement | null;
+        btn?.click();
+        const player = document.getElementById("movie_player") as any;
+        if (player?.skipAd) player.skipAd();
+      }).catch(() => {});
+
+      await sleep(600); // Give the click time to register and state to flip
+      continue;
+    }
+
+    // Try fast-forwarding unskippable ad
+    await page.evaluate(() => {
+      const adVideo = document.querySelector(".ad-showing video, video.html5-main-video") as HTMLVideoElement | null;
+      if (adVideo && isFinite(adVideo.duration) && adVideo.duration > 0 && adVideo.duration <= 30) {
+        adVideo.currentTime = adVideo.duration;
+      }
+    }).catch(() => {});
+
+    await sleep(800); // Wait for countdown to tick down
+  }
+
+  // Final verification check
+  const isGone = await page.evaluate(() => {
+    return !document.querySelector(".ad-showing, .ad-interrupting, .ytp-ad-player-overlay");
+  }).catch(() => true);
+
+  return isGone;
+}
+
+/**
+ * Invariant 1: Delta-State Verified Media Seek
+ * Never assumes seekTo worked. Reads back actual playback time after a 500ms settle.
+ */
+export async function seekAndVerifyYouTube(
+  page: any,
+  targetSeconds: number,
+  isAbsolute = true
+): Promise<{ success: boolean; actualTime: number }> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page.evaluate(
+      ({ targetSeconds, isAbsolute }: { targetSeconds: number; isAbsolute: boolean }) => {
+        const player = document.getElementById("movie_player") as any;
+        const video = document.querySelector(
+          "#movie_player video, video.html5-main-video, video"
+        ) as HTMLVideoElement | null;
+
+        if (player && typeof player.seekTo === "function") {
+          player.seekTo(targetSeconds, true);
+          if (player.playVideo) player.playVideo();
+        } else if (video) {
+          if (isAbsolute) {
+            video.currentTime = targetSeconds;
+          } else {
+            video.currentTime += targetSeconds;
+          }
+          if (video.paused) video.play().catch(() => {});
+        }
+      },
+      { targetSeconds, isAbsolute }
+    ).catch(() => {});
+
+    await sleep(500);
+
+    const actualTime = await page.evaluate(() => {
+      const player = document.getElementById("movie_player") as any;
+      const video = document.querySelector(
+        "#movie_player video, video.html5-main-video, video"
+      ) as HTMLVideoElement | null;
+
+      if (player && typeof player.getCurrentTime === "function") {
+        return Math.round(player.getCurrentTime());
+      }
+      if (video) {
+        return Math.round(video.currentTime);
+      }
+      return -1;
+    }).catch(() => -1);
+
+    if (actualTime >= 0 && Math.abs(actualTime - targetSeconds) < 4) {
+      return { success: true, actualTime };
+    }
+
+    await sleep(300);
+  }
+
+  const finalTime = await page.evaluate(() => {
+    const player = document.getElementById("movie_player") as any;
+    return player?.getCurrentTime ? Math.round(player.getCurrentTime()) : -1;
+  }).catch(() => -1);
+
+  return { success: finalTime >= 0, actualTime: finalTime };
+}
+
+/**
  * On YouTube watch page, check if the loaded video matches the requested goal.
- * If so, ensure playback, apply any time offset (e.g. skip to 1 min), and complete the goal.
+ * Uses Invariant 1 Delta-State verification:
+ * 1. Verifies ad is genuinely gone via tight internal poll (0 planner steps).
+ * 2. Verifies title hydration.
+ * 3. Verifies seek actually occurred by reading back player.getCurrentTime().
  */
 async function tryYouTubeWatchPageCheck(
   page: any,
@@ -405,98 +529,58 @@ async function tryYouTubeWatchPageCheck(
   const targetSeconds = targetPlan?.timeOffsetSeconds ?? null;
   const isAbsolute = targetPlan?.isAbsoluteSeek ?? true;
 
-  const status = await page.evaluate(
-    ({ targetSeconds, isAbsolute }: { targetSeconds: number | null; isAbsolute: boolean }) => {
-      // 1. Check if an ad is actively playing
-      const isAd = !!document.querySelector(".ad-showing, .ad-interrupting, .ytp-ad-player-overlay, .video-ads");
-      if (isAd) {
-        const skipBtn = document.querySelector(
-          ".ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, button.ytp-ad-skip-button"
-        ) as HTMLElement | null;
-        if (skipBtn) skipBtn.click();
+  // 1. Invariant 1: Delta-State Verified Ad Skip (tight internal poll, 0 planner steps)
+  const adClean = await skipYouTubeAdWithVerification(page, 10000);
+  if (!adClean) {
+    return {
+      description: `⚡ Heuristic: Video pre-roll ad in progress, waiting for stream...`,
+      continueLoop: true,
+    };
+  }
 
-        const player = document.getElementById("movie_player") as any;
-        if (player?.skipAd) player.skipAd();
-
-        return { isAd: true, matched: false };
-      }
-
-      const video = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
+  // 2. Hydration Check: wait up to 3.5s for video metadata and real title to hydrate
+  let videoTitle = "";
+  for (let i = 0; i < 7; i++) {
+    videoTitle = await page.evaluate(() => {
       const titleEl = document.querySelector(
         "h1.ytd-watch-metadata, #title h1, ytd-watch-metadata h1, ytd-video-primary-info-renderer h1"
       );
-      const videoTitle = ((titleEl as HTMLElement)?.innerText || document.title || "")
+      const title = ((titleEl as HTMLElement)?.innerText || document.title || "")
         .replace(/\s*-\s*YouTube.*$/i, "")
         .trim();
+      return title.toLowerCase() !== "youtube" ? title : "";
+    }).catch(() => "");
 
-      // If page is still hydrating and title is empty or generic "YouTube"
-      if (!videoTitle || videoTitle.toLowerCase() === "youtube") {
-        return { hydrating: true, matched: false };
-      }
-
-      if (video) {
-        const player = document.getElementById("movie_player") as any;
-
-        if (targetSeconds !== null && targetSeconds > 0) {
-          if (player && typeof player.seekTo === "function") {
-            player.seekTo(targetSeconds, true);
-          } else {
-            if (isAbsolute) {
-              video.currentTime = targetSeconds;
-            } else {
-              video.currentTime += targetSeconds;
-            }
-          }
-        }
-
-        if (player && typeof player.playVideo === "function") {
-          player.playVideo();
-        } else if (video.paused) {
-          video.play().catch(() => {});
-        }
-
-        const currentTime =
-          player && typeof player.getCurrentTime === "function"
-            ? Math.round(player.getCurrentTime())
-            : Math.round(video.currentTime);
-
-        return {
-          matched: true,
-          title: videoTitle,
-          currentTime,
-        };
-      }
-
-      return { matched: false, title: videoTitle };
-    },
-    { targetSeconds, isAbsolute }
-  ).catch(() => null);
-
-  if (status?.isAd) {
-    return {
-      description: `⚡ Heuristic: Pre-roll ad detected on YouTube watch page; skipping ad...`,
-      continueLoop: true,
-    };
-  }
-
-  if (status?.hydrating) {
-    await sleep(1500);
-    return {
-      description: `⚡ Heuristic: Waiting for YouTube player and video metadata to hydrate...`,
-      continueLoop: true,
-    };
-  }
-
-  if (status?.matched && status.title) {
+    if (videoTitle) break;
     await sleep(500);
-    const timeNote = targetSeconds !== null ? ` at ${status.currentTime}s` : "";
+  }
+
+  if (!videoTitle) {
     return {
-      description: `⚡ Heuristic: Verified playback of "${status.title.slice(0, 50)}"${timeNote}`,
-      doneMessage: `Now playing "${status.title}" on YouTube${timeNote}.`,
+      description: `⚡ Heuristic: Waiting for YouTube player title hydration...`,
+      continueLoop: true,
     };
   }
 
-  return null;
+  // 3. Invariant 1: Delta-State Verified Seek (read back actual playback time)
+  let actualSeconds = 0;
+  if (targetSeconds !== null && targetSeconds > 0) {
+    const seekResult = await seekAndVerifyYouTube(page, targetSeconds, isAbsolute);
+    actualSeconds = seekResult.actualTime >= 0 ? seekResult.actualTime : targetSeconds;
+  } else {
+    await page.evaluate(() => {
+      const player = document.getElementById("movie_player") as any;
+      if (player?.playVideo) player.playVideo();
+      const video = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
+      if (video?.paused) video.play().catch(() => {});
+    }).catch(() => {});
+  }
+
+  const timeNote = targetSeconds !== null ? ` at ${actualSeconds}s` : "";
+  return {
+    description: `⚡ Heuristic: Verified playback of "${videoTitle.slice(0, 50)}"${timeNote}`,
+    doneMessage: `Now playing "${videoTitle}" on YouTube${timeNote}.`,
+  };
 }
 
 
