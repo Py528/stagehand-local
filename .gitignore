@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime / Build outputs
+dist/
+build/
+*.tmp
+*.temp
+
+# Agent runtime artifacts & captures
+*.png
+*.jpeg
+*.jpg
+*.webm
+*.webp
+results.csv
+
+# Playwright & Browser caches
+.cache/
+.playwright/
+test-results/
+playwright-report/
