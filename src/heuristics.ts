@@ -407,25 +407,63 @@ async function tryYouTubeWatchPageCheck(
 
   const status = await page.evaluate(
     ({ targetSeconds, isAbsolute }: { targetSeconds: number | null; isAbsolute: boolean }) => {
+      // 1. Check if an ad is actively playing
+      const isAd = !!document.querySelector(".ad-showing, .ad-interrupting, .ytp-ad-player-overlay, .video-ads");
+      if (isAd) {
+        const skipBtn = document.querySelector(
+          ".ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, button.ytp-ad-skip-button"
+        ) as HTMLElement | null;
+        if (skipBtn) skipBtn.click();
+
+        const player = document.getElementById("movie_player") as any;
+        if (player?.skipAd) player.skipAd();
+
+        return { isAd: true, matched: false };
+      }
+
       const video = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
-      const titleEl = document.querySelector("h1.ytd-watch-metadata, #title h1, ytd-watch-metadata h1");
-      const videoTitle = (titleEl as HTMLElement)?.innerText || document.title || "";
+      const titleEl = document.querySelector(
+        "h1.ytd-watch-metadata, #title h1, ytd-watch-metadata h1, ytd-video-primary-info-renderer h1"
+      );
+      const videoTitle = ((titleEl as HTMLElement)?.innerText || document.title || "")
+        .replace(/\s*-\s*YouTube.*$/i, "")
+        .trim();
+
+      // If page is still hydrating and title is empty or generic "YouTube"
+      if (!videoTitle || videoTitle.toLowerCase() === "youtube") {
+        return { hydrating: true, matched: false };
+      }
 
       if (video) {
+        const player = document.getElementById("movie_player") as any;
+
         if (targetSeconds !== null && targetSeconds > 0) {
-          if (isAbsolute) {
-            video.currentTime = targetSeconds;
+          if (player && typeof player.seekTo === "function") {
+            player.seekTo(targetSeconds, true);
           } else {
-            video.currentTime += targetSeconds;
+            if (isAbsolute) {
+              video.currentTime = targetSeconds;
+            } else {
+              video.currentTime += targetSeconds;
+            }
           }
         }
-        if (video.paused) {
+
+        if (player && typeof player.playVideo === "function") {
+          player.playVideo();
+        } else if (video.paused) {
           video.play().catch(() => {});
         }
+
+        const currentTime =
+          player && typeof player.getCurrentTime === "function"
+            ? Math.round(player.getCurrentTime())
+            : Math.round(video.currentTime);
+
         return {
           matched: true,
-          title: videoTitle.replace(/\s*-\s*YouTube.*$/i, "").trim(),
-          currentTime: Math.round(video.currentTime),
+          title: videoTitle,
+          currentTime,
         };
       }
 
@@ -434,7 +472,22 @@ async function tryYouTubeWatchPageCheck(
     { targetSeconds, isAbsolute }
   ).catch(() => null);
 
-  if (status?.matched) {
+  if (status?.isAd) {
+    return {
+      description: `⚡ Heuristic: Pre-roll ad detected on YouTube watch page; skipping ad...`,
+      continueLoop: true,
+    };
+  }
+
+  if (status?.hydrating) {
+    await sleep(1500);
+    return {
+      description: `⚡ Heuristic: Waiting for YouTube player and video metadata to hydrate...`,
+      continueLoop: true,
+    };
+  }
+
+  if (status?.matched && status.title) {
     await sleep(500);
     const timeNote = targetSeconds !== null ? ` at ${status.currentTime}s` : "";
     return {

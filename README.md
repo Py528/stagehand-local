@@ -178,6 +178,15 @@ To completely eliminate unnecessary prompt evaluations and prevent memory pressu
   - **BM25 / Fuzzy Scored Candidate Selection (`clickBestMatchingCard`)**: Eliminates blind `.first()` clicks on YouTube and SERP pages. Scrapes candidate cards in-browser (<15ms) and builds an in-memory `MiniSearch` index across titles and channel names, clicking the candidate with the highest keyword relevance (e.g. matching official music videos over unrelated playlist intros or ads).
   - **Strict State-Gated Action Dispatcher**: Media seeking and skipping are strictly state-gated to verified watch pages (`youtube.com/watch` or `/video/`). Pre-action state gates reject any seek attempt on search results pages (`youtube.com/results`, `google.com/search`) and redirect execution to candidate card matching until the page transition completes.
   - **CDP Lifecycle Synchronization**: Replaced un-awaited raw `page.goto` calls with `navigate(page, url)` and `waitForURL(/.*watch\?v=.*/)`, ensuring `domcontentloaded` and network idle states settle before CDP evaluations execute. Eliminates `-32001 Session with given id not found` disconnect errors.
+  - **Universal Interstitial Recovery Protocol (`src/interstitial.ts`)**:
+    - **Viewport Occlusion & Pointer-Event Diagnostics**: Probes viewport center with `document.elementFromPoint()` to detect fixed/absolute high-z overlays, modals, and pre-roll ads blocking interactions.
+    - **Time-Aware Countdown Waiting**: Detects active countdowns ("Skip in 5s", "Wait 3s") and waits until either the timer expires or a skip/dismiss action becomes enabled.
+    - **Video Pre-Roll Ad Handler**: Specifically detects video ads (`.ad-showing`, `.ad-interrupting`), bypasses them via player API `player.skipAd()` or clicks `.ytp-skip-ad-button` before attempting media seek.
+    - **4-Tier Escalation Ladder**:
+      1. *Tier 1 (Semantic Escape)*: Dispatches keyboard `Escape` event to dismiss standard native dialogs.
+      2. *Tier 2 (Action Word Scan)*: Detects and clicks action buttons (`"Skip"`, `"Close"`, `"Dismiss"`, `"No thanks"`, `"Got it"`).
+      3. *Tier 3 (Geometric Coordinate Hunting)*: Clicks the top-right / top-left corner zone of the blocking overlay to dismiss custom/SVG modals without text or labels.
+      4. *Tier 4 (Surgical Guillotine)*: Removes high-z overlay DOM nodes and resets `document.body.style.overflow = "auto"` to unlock scrolling without breaking page layout.
   - **Google SERP Fast-Hop**: On Google Search pages, checks for visible direct answers or automatically resolves the first clean organic result (`page.locator('#search a[href^="http"]:not([href*="google.com"])').first()`) and fast-hops directly into the destination URL (`continueLoop: true`), completely bypassing the LLM planner.
   - **Semantic Subpage Traversal**: Automatically navigates to standard subpages (`careers`, `pricing`, `contact`, `docs`, `about`, `login`) via matching anchor attributes.
 - **Tier 1: Hermes Site Memory & Archetype Detection (`src/playbook.ts`)**

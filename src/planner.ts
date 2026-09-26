@@ -28,6 +28,7 @@ import {
 } from "./distill.js";
 import { tryHeuristic } from "./heuristics.js";
 import { compileGoal, type ExecutionPlan } from "./compiler.js";
+import { handleInterstitials } from "./interstitial.js";
 import { playbooks, autoLearnFromPage, tryDirectAtsFetch, findAtsUrlOnPage } from "./playbook.js";
 
 export const PLANNER_PROMPT = `You are an autonomous web agent planner controlling a browser.
@@ -351,6 +352,15 @@ export async function runAgent(
     const title = await page.title().catch(() => "");
 
     console.log(`[${step}/${cfg.agent.maxSteps}] 📍 "${title || "Blank"}" (${url})`);
+
+    // ─── INTERSTITIAL RECOVERY PROTOCOL: Detect & Clear Blockers (Ads, Modals, Overlays) ───
+    try {
+      const interstitial = await handleInterstitials(page);
+      if (interstitial.handled) {
+        console.log(`   🛡️ Interstitial Handled: ${interstitial.action}`);
+        history.push(`Dismantled blocker: ${interstitial.action}`);
+      }
+    } catch {}
 
     // ─── TIER 0: Zero-LLM Heuristic Fast-Paths (<100ms, 0 tokens) ───
     try {
