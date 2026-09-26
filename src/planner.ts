@@ -17,6 +17,8 @@ import {
 import { activePage, navigate, dismissCookies, captureScreenshotBase64 } from "./browser.js";
 import type { PlanAction } from "./types.js";
 import { distillPage, getCapturedApiData, fastExtract, buildPlannerSnapshot } from "./distill.js";
+import { tryHeuristic } from "./heuristics.js";
+import { playbooks, autoLearnFromPage } from "./playbook.js";
 
 export const PLANNER_PROMPT = `You are an autonomous web agent planner controlling a browser.
 Given the user goal, current page, action history, and session context, decide ONE next action.
@@ -219,8 +221,8 @@ export interface AgentStepCallback {
     title: string;
     url: string;
     plan: PlanAction;
-    result?: string;
-    screenshot?: string;
+    result?: string | undefined;
+    screenshot?: string | undefined;
   }): void;
 }
 
@@ -245,6 +247,55 @@ export async function runAgent(
 
     console.log(`[${step}/${cfg.agent.maxSteps}] 📍 "${title || "Blank"}" (${url})`);
 
+    // ─── TIER 0: Zero-LLM Heuristic Fast-Paths (<100ms, 0 tokens) ───
+    try {
+      const heuristic = await tryHeuristic(page, goal, url, history);
+      if (heuristic) {
+        console.log(`   ${heuristic.description}`);
+        history.push(heuristic.description);
+        if (onStep) {
+          const screenshot = await captureScreenshotBase64(page);
+          onStep({
+            step, maxSteps: cfg.agent.maxSteps, title, url,
+            plan: heuristic.doneMessage
+              ? { action: "done", message: heuristic.doneMessage }
+              : { action: "act", instruction: heuristic.description },
+            result: heuristic.doneMessage,
+            screenshot,
+          });
+        }
+        if (heuristic.doneMessage) {
+          console.log(`\n🎉 ${heuristic.doneMessage}\n`);
+          // Auto-learn from this page
+          const capturedUrls = Array.from(
+            (getCapturedApiData() || "").matchAll(/\[([^\]]+)\]:/g)
+          ).map((m) => m[1]!);
+          await autoLearnFromPage(page, url, capturedUrls);
+          playbooks.recordSuccess(normalizeDomain(url));
+          return heuristic.doneMessage;
+        }
+        if (heuristic.continueLoop) continue;
+      }
+    } catch {
+      // Heuristic failure is non-fatal — fall through to planner
+    }
+
+    // ─── TIER 1: Playbook / Site Memory Check ───
+    try {
+      const domain = normalizeDomain(url);
+      const pb = playbooks.get(domain);
+      if (pb && pb.endpoints.length > 0) {
+        // Check if any captured API data matches known endpoints
+        const apiData = getCapturedApiData();
+        if (apiData && apiData.length > 100) {
+          console.log(`   📚 Playbook hit: ${domain} (${pb.endpoints.length} known endpoints, archetype: ${pb.archetypeId || "none"})`);
+        }
+      }
+    } catch {
+      // Non-critical
+    }
+
+    // ─── TIER 2: Distilled LLM Planner ───
     // Distill page for planner context (~20ms in-browser)
     const distilled = await distillPage(page);
     const apiData = getCapturedApiData();
@@ -382,6 +433,14 @@ export async function runAgent(
             const screenshot = await captureScreenshotBase64(page);
             onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan, result: answer, screenshot });
           }
+          // Auto-learn from successful extraction
+          try {
+            const capturedUrls = Array.from(
+              (getCapturedApiData() || "").matchAll(/\[([^\]]+)\]:/g)
+            ).map((m) => m[1]!);
+            await autoLearnFromPage(page, url, capturedUrls);
+            playbooks.recordSuccess(normalizeDomain(url));
+          } catch {}
           break;
         } else {
           console.log(`   ℹ️ Extraction partial. Continuing exploration...`);
@@ -395,5 +454,27 @@ export async function runAgent(
     }
   }
 
+  // Auto-learn from page even if we didn't fully complete
+  try {
+    const finalPage = await activePage(sh, initialPage);
+    const finalUrl = await finalPage.url().catch(() => "");
+    if (finalUrl && finalUrl !== "about:blank") {
+      const capturedUrls = Array.from(
+        (getCapturedApiData() || "").matchAll(/\[([^\]]+)\]:/g)
+      ).map((m) => m[1]!);
+      await autoLearnFromPage(finalPage, finalUrl, capturedUrls);
+    }
+  } catch {}
+
   return answer;
+}
+
+/** Helper: normalize domain from a URL */
+function normalizeDomain(urlStr: string): string {
+  try {
+    const u = new URL(urlStr.startsWith("http") ? urlStr : `https://${urlStr}`);
+    return u.hostname.replace(/^www\./, "");
+  } catch {
+    return urlStr;
+  }
 }

@@ -1,0 +1,22 @@
+llama-server \
+  -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ4_XS \
+  -hfd unsloth/gemma-4-26B-A4B-it-GGUF:MTP-Q8_0.gguf \
+  --no-mmproj \
+  --spec-draft-n-max 2 \
+  --spec-draft-p-min 0.6 \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --jinja \
+  -c 65536 \
+  -np 1 \
+  --n-gpu-layers 99 \
+  --flash-attn on \
+  --cache-type-k q4_0 \
+  --cache-type-v q4_0 \
+  --temp 1.0 \
+  --top-p 0.95 \
+  --top-k 64 \
+  --repeat-penalty 1.0 \
+  --reasoning-format deepseek \
+  --reasoning-budget 4096 \
+  --reasoning-budget-message "\n[Thinking budget reached. Finalize reasoning now.]\n"

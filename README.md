@@ -54,11 +54,15 @@ stagehand-local/
 │   ├── files.ts          # Inline @file parser, workspace scanner, PDF reader (pdf-parse), editor spawner
 │   ├── browser.ts        # Playwright lifecycle, DOM settling, zero-cost cookie dismissal, screenshots
 │   ├── distill.ts        # In-browser DOM distillation, SPA API interception, fast extract & snapshot builder
+│   ├── heuristics.ts     # Tier 0: Zero-LLM deterministic fast paths (media, search, navigation)
+│   ├── playbook.ts       # Tier 1: Hermes site memory, archetype fingerprinting & auto-learning
 │   ├── llm.ts            # OpenAI client adapter, Stagehand custom model provider & schema prompts
 │   ├── planner.ts        # Autonomous multi-step planning loop, adaptive replanning, conclusive evaluator
 │   ├── scan.ts           # CSV batch URL extractor with real-time stream processing
 │   ├── cli.ts            # OpenCode-style interactive REPL, @ autocomplete, bracketed paste
 │   └── server.ts         # Fast HTTP & SSE Web UI server with live screen preview
+├── data/
+│   └── playbooks.json    # Persisted domain playbooks, verified endpoints, and selectors
 ├── index.ts              # Clean, unified CLI & Web UI entry point
 ├── config.json           # Default configuration (LLM, browser, heuristics, shortcuts)
 └── package.json
@@ -72,12 +76,10 @@ flowchart TD
         OneShot[One-Shot CLI Execution]
     end
 
-    subgraph Core_Engine [Core Engine]
-        Router[Router & Intent Classifier - conversation.ts]
-        Planner[Adaptive Multi-Step Planner - planner.ts]
-        FastPath[Direct URL & Shortcut Fast Path - browser.ts]
-        Mem[Pinned Context Buffer - conversation.ts]
-        Distill[DOM Distiller & API Interceptor - distill.ts]
+    subgraph Tiered_Pipeline [Three-Tier Execution Pipeline]
+        T0[Tier 0: Deterministic Fast-Paths - heuristics.ts\n0 tokens, <100ms]
+        T1[Tier 1: Hermes Site Memory & Archetypes - playbook.ts\nEndpoints, Selectors, Shortcuts]
+        T2[Tier 2: Distilled DOM + Fast LLM Planner - planner.ts\n~500 token snapshots, fast extract]
     end
 
     subgraph LLM_Adapter [Local LLM Adapter Layer]
@@ -89,23 +91,21 @@ flowchart TD
     subgraph Browser_Layer [Browser Automation]
         StagehandSDK[Stagehand SDK - stagehand.ts]
         Playwright[Playwright Chromium - browser.ts]
+        Distill[DOM Distiller & API Interceptor - distill.ts]
         DOMScanner[Zero-LLM Cookie Dismissal - browser.ts]
     end
 
-    UI_Layer --> Router
-    Router --> Planner
-    Router --> FastPath
-    Router --> Mem
-
-    Planner --> Distill
+    UI_Layer --> T0
+    T0 -- Handled (Media, Nav, Search) --> Playwright
+    T0 -- Unhandled --> T1
+    T1 -- Shortcut / Playbook Hit --> Playwright
+    T1 -- Planner Step --> T2
+    T2 --> Distill
     Distill --> Playwright
-    Planner --> StagehandSDK
-    FastPath --> Playwright
+    T2 --> StagehandSDK
     StagehandSDK --> LLMAdapter
     LLMAdapter --> ZodHealer
     ZodHealer --> LlamaServer
-
-    StagehandSDK --> Playwright
     Playwright --> DOMScanner
 ```
 
@@ -146,6 +146,23 @@ When running on local hardware (e.g., Apple Silicon unified memory), evaluating 
 - **Network & SPA State Interception (`setupApiInterceptor`)**: Injects an in-browser hook via `page.addInitScript()` to capture XHR and `fetch` requests matching internal JSON endpoints (`/api/`, `/v1/`, `/graphql`, `.json`), as well as SPA globals (`window.__NEXT_DATA__`, `window.ytInitialData`). Modern SPAs return clean JSON (200–500 tokens) that completely bypasses DOM evaluation.
 - **Fast Extract Path (`fastExtract`)**: Runs extraction prompts against distilled markdown or captured JSON instead of invoking Stagehand's full accessibility tree serializer. Executes in ~1–2s with 10x faster prefill; automatically falls back to full Stagehand extraction if distilled data is insufficient.
 - **Planner Page Snapshots (`buildPlannerSnapshot`)**: Injects a compact snapshot of visible interactive controls and headings directly into each planner step prompt (~500 tokens), giving the planner exact visibility into page state without guessing.
+
+### 7. Three-Tier Execution Pipeline & Hermes Site Memory
+To completely eliminate unnecessary prompt evaluations and prevent memory pressure on local hardware, Stagehand Local uses a tiered decision engine:
+
+- **Tier 0: Deterministic Fast-Paths (`src/heuristics.ts`) — 0 Tokens, <100ms**
+  - Executes pure DOM scripting and verified Playwright selectors for zero-ambiguity tasks:
+    - **Media Player Automation**: Play, pause, skip/seek (e.g. `"skip 30 seconds"`, `"jump to 2 minutes"`), mute, and fullscreen on YouTube and native HTML5 `<video>` players.
+    - **YouTube Instant Play**: Searches YouTube and directly clicks the first video renderer.
+    - **Search Result Deep Navigation**: Clicks the first organic link on Google/Bing search results without wasting a planner turn.
+    - **Semantic Subpage Traversal**: Automatically navigates to standard subpages (`careers`, `pricing`, `contact`, `docs`, `about`, `login`) via matching anchor attributes.
+- **Tier 1: Hermes Site Memory & Archetype Detection (`src/playbook.ts`)**
+  - **Persistent Site Playbooks (`data/playbooks.json`)**: Tracks visited domains, historical success rates, verified selectors, and direct URL shortcuts.
+  - **SPA API Endpoint Memory**: When Stagehand intercepts internal JSON endpoints (e.g. Job board endpoints, catalog APIs), it indexes them to the site's playbook for instant retrieval on future visits.
+  - **Master Archetype Fingerprinting**: Includes built-in archetype templates (e.g., ATS/Careers: Lever, Greenhouse, Ashby; E-Commerce: Shopify; Media: YouTube). In-browser fingerprinting evaluates DOM signals, script paths, and globals (`window.__NEXT_DATA__`, `window.Shopify`, `window.ytInitialData`). When a site matches ≥2 signals, it automatically inherits known selectors and endpoints.
+  - **Autonomous Auto-Learning**: Automatically updates domain records upon every successful extraction or task completion.
+- **Tier 2: Distilled DOM + Fast Local LLM Planning (`src/planner.ts`)**
+  - When heuristics and playbook shortcuts do not apply, the agent falls back to local LLM planning using lightweight distilled page snapshots (~500 tokens) rather than raw HTML or full CDP accessibility trees.
 
 ---
 
