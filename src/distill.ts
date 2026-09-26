@@ -264,62 +264,82 @@ export async function distillPage(page: any): Promise<DistilledPage> {
           iIdx++;
         });
 
-        // ── Text Content ──
-        // ── Text Content ──
-        const contentSelector = [
-          "li",
-          '[role="listitem"]',
-          "article",
-          "tr",
-          "p",
-          "td",
-          "th",
-          "figcaption",
-          "blockquote",
-          '[role="article"]',
-          "dt",
-          "dd",
-          "pre",
-          '[class*="job"]',
-          '[class*="career"]',
-          '[class*="position"]',
-          '[class*="role"]',
-          '[class*="opening"]',
-        ].join(", ");
+        // ── Text Content (General, Structural DOM Distillation) ──
+        // Strategy: Extract structured container rows (tr, li, article, cards) so related
+        // fields (title, rank, points, author, comments) remain intact as atomic units!
+        const containers = document.querySelectorAll(
+          'tr, li, article, [role="row"], [role="article"], [role="listitem"], [class*="card" i], [class*="item" i], [class*="row" i], [class*="post" i], [class*="story" i], p, blockquote, dt, dd'
+        );
 
-        document.querySelectorAll(contentSelector).forEach((el) => {
+        containers.forEach((el) => {
           if (textBlocks.length >= 150) return;
           try {
             const s = window.getComputedStyle(el);
-            if (
-              s.display === "none" ||
-              s.visibility === "hidden" ||
-              s.opacity === "0"
-            )
-              return;
+            if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0") return;
           } catch {
             return;
           }
 
-          // Skip navigation or footer noise when extracting main content
-          const noise = el.closest("nav, footer, script, style, noscript");
+          // Skip header/nav/footer chrome noise
+          const noise = el.closest("nav, footer, header, script, style, noscript, svg");
           if (noise) return;
 
-          // Only extract terminal/leaf text (elements where children.length === 0 or standard list items)
-          const isStandardListItem =
-            el.tagName.toLowerCase() === "li" ||
-            el.getAttribute("role") === "listitem";
-          const isLeaf = el.children.length === 0;
-          if (!isLeaf && !isStandardListItem) return;
+          let t = "";
+          const tag = el.tagName.toLowerCase();
+          if (tag === "tr") {
+            const cells = Array.from(el.querySelectorAll("td, th"))
+              .map((c) => (c as HTMLElement).innerText?.trim().replace(/\s+/g, " "))
+              .filter((c) => c && c.length > 0);
+            t = cells.join(" | ");
+          } else {
+            t = (el as HTMLElement).innerText?.trim().replace(/\s+/g, " ") || "";
+          }
 
-          const t = el.textContent?.trim().replace(/\s+/g, " ");
-          if (!t || t.length < 10 || t.length > 300) return;
+          if (!t || t.length < 8 || t.length > 500) return;
 
-          const key = t.slice(0, 100);
+          const key = t.slice(0, 120);
           if (seen.has(key)) return;
+
+          // If a parent container already captured this exact text, skip to avoid duplicates
+          let parent = el.parentElement;
+          let isNestedInCaptured = false;
+          while (parent && parent !== document.body) {
+            const parentKey = (parent as HTMLElement).innerText?.trim().replace(/\s+/g, " ").slice(0, 120) || "";
+            if (seen.has(parentKey)) {
+              isNestedInCaptured = true;
+              break;
+            }
+            parent = parent.parentElement;
+          }
+          if (isNestedInCaptured) return;
+
           seen.add(key);
           textBlocks.push(t);
         });
+
+        // ── Robust Visible Text Fallback ──
+        // If structured containers collected fewer than 150 characters, fall back to clean visible text
+        if (textBlocks.length === 0 || textBlocks.reduce((sum, b) => sum + b.length, 0) < 150) {
+          const mainArea =
+            document.querySelector("main, #content, #main, [role='main']") ||
+            document.body;
+          if (mainArea) {
+            const rawVisible = (mainArea as HTMLElement).innerText || "";
+            const lines = rawVisible
+              .split("\n")
+              .map((l) => l.trim().replace(/\s+/g, " "))
+              .filter((l) => l.length >= 8 && l.length <= 500);
+
+            for (const line of lines) {
+              if (textBlocks.length >= 150) break;
+              const k = line.slice(0, 120);
+              if (!seen.has(k)) {
+                seen.add(k);
+                textBlocks.push(line);
+              }
+            }
+          }
+        }
 
         // ── Assemble ──
         let md = "";
@@ -418,10 +438,17 @@ export function rankDistilledBlocks(
     lowerQuery.includes("list") ||
     lowerQuery.includes("every") ||
     lowerQuery.includes("openings") ||
-    lowerQuery.includes("roles");
+    lowerQuery.includes("roles") ||
+    lowerQuery.includes("stories") ||
+    lowerQuery.includes("top ") ||
+    lowerQuery.includes("table");
 
-  // For broad/list queries, expand to up to 30 blocks (~800 tokens)
-  const effectiveTopK = isBroadExtraction ? Math.min(blocks.length, 30) : topK;
+  // For broad/list queries, expand to up to 40 blocks and preserve natural DOM document order!
+  const effectiveTopK = isBroadExtraction ? Math.min(blocks.length, 40) : topK;
+
+  if (isBroadExtraction) {
+    return blocks.slice(0, effectiveTopK);
+  }
 
   try {
     const miniSearch = new MiniSearch({
@@ -454,9 +481,11 @@ export function rankDistilledBlocks(
 
     const searchResults = miniSearch.search(cleanedQuery);
     if (searchResults && searchResults.length > 0) {
-      const topResults = searchResults.slice(0, effectiveTopK).map((r) => r.text as string);
+      const topDocs = searchResults.slice(0, effectiveTopK);
+      // Re-sort by original document order (id) so ranks, layout, and narrative flow are preserved!
+      topDocs.sort((a, b) => Number(a.id) - Number(b.id));
+      const topResults = topDocs.map((r) => blocks[Number(r.id)] || (r.text as string));
       const totalChars = topResults.reduce((s, r) => s + r.length, 0);
-      // Safety floor: if ranked results are trivial (< 200 chars), fall back to top blocks
       if (totalChars > 200 || blocks.length <= effectiveTopK) {
         return topResults;
       }

@@ -143,16 +143,20 @@ Modern SPAs constantly hydrate and detach frames during load. Stagehand Local in
 When running on local hardware (e.g., Apple Silicon unified memory), evaluating large prompts is a major performance bottleneck: processing 10,000–30,000 tokens from raw HTML or Stagehand's full CDP Accessibility tree takes 15–30 seconds, balloons the KV cache, and causes swap thrashing or timeouts. Stagehand Local introduces a multi-tier distillation and extraction engine in `src/distill.ts` and `src/planner.ts`:
 
 - **Deep In-Browser DOM Distillation (`distillPage`)**:
-  - Runs inside the browser via `page.evaluate()` in ~10–25ms.
-  - Strips styling, scripts, SVGs, and invisible elements, outputting semantic headings (`h1`–`h4`), visible interactive controls, and structured content blocks.
-  - **Deep Text & List Capture**: Targets headings, paragraphs, list items (`li`, `[role="listitem"]`), table rows (`tr`, `td`, `th`), and role/card elements (`[class*="job"]`, `[class*="career"]`, `[class*="position"]`). Captures badges as short as 5 chars (e.g., `"Remote"`, `"Full Time"`).
-  - **Noise Filtering & Deduplication**: Skips headers, navigation bars (`<nav>`), and footers (`<footer>`) to ensure content slots aren't stolen by site menus. Prunes container redundancies while preserving multi-span composite list items.
-  - Generates up to **12,000 characters** (~3,000 tokens) across up to 150 content blocks, ensuring complete job boards (e.g., 35+ openings on Roboflow careers) fit in a single distilled snapshot.
+  - Runs inside the browser via `page.evaluate()` in ~10–25ms across any modern or legacy website.
+  - **Structural Container-First Extraction**: Targets logical record containers first (`tr`, `li`, `article`, `[role="row"]`, `[role="article"]`, `[class*="card"]`, `[class*="item"]`, `p`, `blockquote`). Keeps composite records (e.g., story title + author + points + comments, or job title + department + location) intact as atomic units instead of scattering them into isolated leaf fragments.
+  - **Table Column Alignment**: Formats table rows (`<tr>`) with clean `col1 | col2 | col3` cell separators, keeping column structures aligned for local LLM evaluation.
+  - **Child Deduplication & Noise Filtering**: Skips headers, navigation bars (`<nav>`), footers (`<footer>`), and child elements whose parent container was already captured.
+  - **Universal Visible Text Fallback**: If structured container extraction yields less than 150 characters (e.g. custom Web Components, canvas wrappers, unusual frameworks), it automatically falls back to clean visible text from `main`, `#content`, `[role="main"]`, or `document.body`. Completely eliminates `~0 tokens` distillation failures.
+  - Generates up to **12,000 characters** (~3,000 tokens) across up to 150 content blocks in a single distilled snapshot.
 
 - **MiniSearch Pre-Extraction Filter (`rankDistilledBlocks`)**:
   - Automatically indexes distilled text blocks using in-memory full-text search (`minisearch` with `prefix: true` and `fuzzy: 0.2`).
-  - Strips natural language question stop-words (`find`, `extract`, `all`, `from`, `for`) from the extraction instruction.
-  - Slices the top 5–8 most relevant blocks into `fastExtract()`, reducing prompt size from thousands of characters down to **~180 tokens** for lightning-fast, hallucination-free evaluation on Gemma 4.
+  - **Document Order Preservation**: For broad extractions (`all`, `list`, `stories`, `jobs`, `roles`, `top`, `table`), preserves blocks in their **exact DOM document order**. For specific keyword searches, re-sorts matched blocks by original document index (`id`), ensuring rankings, row alignment, and narrative context are never shuffled.
+  - Slices relevant blocks into `fastExtract()`, reducing prompt size from thousands of characters down to **~180–400 tokens** for lightning-fast, hallucination-free evaluation on Gemma 4.
+
+- **Structural Extraction Self-Verification (`isExtractionValid`)**:
+  - Inspects extracted JSON arrays to verify data integrity. Rejects empty, trivial, ID-only, or degraded extractions where primary fields (e.g. `title`, `name`, `role`) are mostly `"N/A"`, `"Unknown"`, `"null"`, or empty, automatically triggering retries or escalation rather than accepting hallucinated data.
 
 - **Dedicated Google SERP Distiller (`distillGoogleSearch`)**:
   - Extracts Google Search results without injecting ads, related searches, tracking parameters, or footer bloat.
@@ -160,7 +164,7 @@ When running on local hardware (e.g., Apple Silicon unified memory), evaluating 
   - **Clean Organic Results**: Extracts top 7 organic results (Title + destination URL). Drops SERP planner prompt size from ~800 tokens to **~120 tokens**, allowing the planner to navigate directly (`{"action":"navigate","url":"https://roboflow.com/careers"}`) or click by title instead of executing fragile, deep XPath selectors.
 
 - **Resilient Multi-Tier Fallback Extraction (`extractText`)**:
-  - Eliminates the local LLM timeouts that occur when falling back to Stagehand's 30,000-token full AXTree dump:
+  - Eliminates local LLM timeouts that occur when falling back to Stagehand's 30,000-token full AXTree dump:
     1. **Tier 1 (Distilled Fast Extract)**: Ingests top ranked distilled content and intercepted API responses. Succeeds in ~1–2s on 90%+ of pages.
     2. **Tier 2 (Scoped Locator Extract)**: If distillation was partial, dynamically locates the primary content container (`main`, `#content`, `#main-content`, `.jobs`, `.careers`, `[role="main"]`, `article`, `section`) and scopes Stagehand's extract using `page.locator(mainSelector)` and `{ selector }`.
     3. **Tier 3 (Direct In-Browser Text Extract)**: Pulls up to 15,000 characters of visible DOM `innerText` from main content containers and feeds it directly to the local model, completely bypassing AXTree serialization.
@@ -178,19 +182,32 @@ To completely eliminate unnecessary prompt evaluations and prevent memory pressu
   - **BM25 / Fuzzy Scored Candidate Selection (`clickBestMatchingCard`)**: Eliminates blind `.first()` clicks on YouTube and SERP pages. Scrapes candidate cards in-browser (<15ms) and builds an in-memory `MiniSearch` index across titles and channel names, clicking the candidate with the highest keyword relevance (e.g. matching official music videos over unrelated playlist intros or ads).
   - **Strict State-Gated Action Dispatcher**: Media seeking and skipping are strictly state-gated to verified watch pages (`youtube.com/watch` or `/video/`). Pre-action state gates reject any seek attempt on search results pages (`youtube.com/results`, `google.com/search`) and redirect execution to candidate card matching until the page transition completes.
   - **CDP Lifecycle Synchronization**: Replaced un-awaited raw `page.goto` calls with `navigate(page, url)` and `waitForURL(/.*watch\?v=.*/)`, ensuring `domcontentloaded` and network idle states settle before CDP evaluations execute. Eliminates `-32001 Session with given id not found` disconnect errors.
+  - **Delta-State Verified YouTube Ad Skipping & 3-Attempt Escalation**:
+    - **16x Playback Acceleration**: Automatically sets ad video `playbackRate = 16` and `muted = true`, clearing 5s countdowns in **~312ms** and 15s unskippable ads in **~900ms**.
+    - **Dual-Mode Native CDP Click**: Dispatches full synthetic pointer/mouse events and executes native Playwright hardware-level mouse clicks (`page.mouse.click(x, y)` with `isTrusted: true`) using bounding boxes, bypassing player synthetic event shields.
+    - **Accurate Ad State vs. Lingering Container Disambiguation**: Cross-references player API (`player.getVideoData().isAd`, `player.getAdState()`) and visible overlay dimensions to eliminate false-positive loops on persistent empty ad containers.
+    - **Content Protection**: Strictly guards against seeking content videos and locks `playbackRate = 1.0` and `muted = false` upon ad completion.
+    - **Attempt 1 Diagnostic Dump**: Logs ad candidate metadata (`🔍 AD DEBUG`) and captures `debug-ad-*.png` screenshots immediately on attempt 1.
+    - **3-Attempt Escalation**: If ad skipping does not succeed within 3 attempts, automatically yields control to the Tier 2 LLM planner.
   - **Universal Interstitial Recovery Protocol (`src/interstitial.ts`)**:
     - **Viewport Occlusion & Pointer-Event Diagnostics**: Probes viewport center with `document.elementFromPoint()` to detect fixed/absolute high-z overlays, modals, and pre-roll ads blocking interactions.
     - **Time-Aware Countdown Waiting**: Detects active countdowns ("Skip in 5s", "Wait 3s") and waits until either the timer expires or a skip/dismiss action becomes enabled.
-    - **Video Pre-Roll Ad Handler**: Specifically detects video ads (`.ad-showing`, `.ad-interrupting`), bypasses them via player API `player.skipAd()` or clicks `.ytp-skip-ad-button` before attempting media seek.
     - **4-Tier Escalation Ladder**:
       1. *Tier 1 (Semantic Escape)*: Dispatches keyboard `Escape` event to dismiss standard native dialogs.
       2. *Tier 2 (Action Word Scan)*: Detects and clicks action buttons (`"Skip"`, `"Close"`, `"Dismiss"`, `"No thanks"`, `"Got it"`).
       3. *Tier 3 (Geometric Coordinate Hunting)*: Clicks the top-right / top-left corner zone of the blocking overlay to dismiss custom/SVG modals without text or labels.
       4. *Tier 4 (Surgical Guillotine)*: Removes high-z overlay DOM nodes and resets `document.body.style.overflow = "auto"` to unlock scrolling without breaking page layout.
   - **Google SERP Fast-Hop**: On Google Search pages, checks for visible direct answers or automatically resolves the first clean organic result (`page.locator('#search a[href^="http"]:not([href*="google.com"])').first()`) and fast-hops directly into the destination URL (`continueLoop: true`), completely bypassing the LLM planner.
-  - **Semantic Subpage Traversal**: Automatically navigates to standard subpages (`careers`, `pricing`, `contact`, `docs`, `about`, `login`) via matching anchor attributes.
+  - **Loop-Immune Semantic Navigation (`trySemanticNavigation`)**:
+    - **URL Stripping**: Strips hostnames/URLs from instructions before matching keywords so domain names (e.g. `news.ycombinator.com`) never falsely trigger navigation heuristics.
+    - **Inquiry Exclusion**: Bypasses semantic navigation when the goal is an extraction or question (`what`, `which`, `extract`, `how many`, `think which`, etc.).
+    - **`isAlreadyOnTargetPage` Guard**: Skips navigation if current URL already satisfies the target (`/careers`, `/jobs`, `/pricing`, `/docs`, etc.).
+    - **In-Page Anchor & Hash Filter**: Ignores links pointing to the same page or `#hash` anchors (e.g. `#jobs`).
+    - **Delta-State Verification**: Verifies `urlAfter !== urlBefore` after clicking before claiming success.
+    - **Per-Domain Target Dedup**: Ensures a semantic target is visited at most once per domain in a session.
 - **Tier 1: Hermes Site Memory & Archetype Detection (`src/playbook.ts`)**
   - **Direct ATS API Fast-Path (<200ms, 0 DOM tokens)**: When visiting or linking to modern ATS providers (**Ashby**, **Greenhouse**, **Lever**), the agent intercepts or scans for ATS endpoints and fetches the complete job board via public REST APIs (`api.ashbyhq.com/posting-api/job-board/{org}`, `boards-api.greenhouse.io/v1/boards/{org}/jobs`, `api.lever.co/v0/postings/{org}`). Completely bypasses DOM rendering and prompt generation.
+  - **Deep ATS Script & Global Detection (`findAtsUrlOnPage`)**: Detects script-based ATS embeds (e.g. `<script src="https://jobs.ashbyhq.com/<org>/embed">`), window globals (`window.ashby.settings.ashbyBaseJobBoardUrl`), and inline script API URLs on corporate careers pages (e.g. Roboflow).
   - **Persistent Site Playbooks (`data/playbooks.json`)**: Tracks visited domains, historical success rates, verified selectors, and direct URL shortcuts.
   - **SPA API Endpoint Memory**: When Stagehand intercepts internal JSON endpoints (e.g. Job board endpoints, catalog APIs), it indexes them to the site's playbook for instant retrieval on future visits.
   - **Master Archetype Fingerprinting**: Includes built-in archetype templates (e.g., ATS/Careers: Lever, Greenhouse, Ashby; E-Commerce: Shopify; Media: YouTube). In-browser fingerprinting evaluates DOM signals, script paths, and globals (`window.__NEXT_DATA__`, `window.Shopify`, `window.ytInitialData`). When a site matches ≥2 signals, it automatically inherits known selectors and endpoints.

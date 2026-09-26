@@ -865,6 +865,7 @@ export async function findAtsUrlOnPage(page: any): Promise<string | null> {
           return href;
         }
       }
+
       // 2. Check iframes
       const iframes = Array.from(document.querySelectorAll("iframe[src]")) as HTMLIFrameElement[];
       for (const f of iframes) {
@@ -877,6 +878,45 @@ export async function findAtsUrlOnPage(page: any): Promise<string | null> {
           return src;
         }
       }
+
+      // 3. Check window globals (e.g. window.ashby.settings.ashbyBaseJobBoardUrl)
+      const ashbyGlobal = (window as any).ashby?.settings?.ashbyBaseJobBoardUrl;
+      if (ashbyGlobal && typeof ashbyGlobal === "string") {
+        return ashbyGlobal;
+      }
+
+      // 4. Check script tags (embed scripts like jobs.ashbyhq.com/<org>/embed)
+      const scripts = Array.from(document.querySelectorAll("script[src]")) as HTMLScriptElement[];
+      for (const s of scripts) {
+        const src = s.src || "";
+        const ashbyMatch = src.match(/jobs\.ashbyhq\.com\/([a-zA-Z0-9_-]+)/);
+        if (ashbyMatch && ashbyMatch[1] && !["embed", "api", "posting-api"].includes(ashbyMatch[1].toLowerCase())) {
+          return `https://jobs.ashbyhq.com/${ashbyMatch[1]}`;
+        }
+        const ghMatch = src.match(/(?:boards|job-boards)\.greenhouse\.io\/(?:embed\/job_board\?for=)?([a-zA-Z0-9_-]+)/);
+        if (ghMatch && ghMatch[1] && !["embed"].includes(ghMatch[1].toLowerCase())) {
+          return `https://boards.greenhouse.io/${ghMatch[1]}`;
+        }
+      }
+
+      // 5. Check inline scripts for ATS URLs or API endpoints
+      const inlineScripts = Array.from(document.querySelectorAll("script:not([src])"));
+      for (const s of inlineScripts) {
+        const text = s.textContent || "";
+        const ashbyM = text.match(/https:\/\/(?:jobs\.)?ashbyhq\.com\/(?:posting-api\/job-board\/)?([a-zA-Z0-9_-]+)/);
+        if (ashbyM && ashbyM[1] && !["embed", "api", "posting-api"].includes(ashbyM[1].toLowerCase())) {
+          return `https://jobs.ashbyhq.com/${ashbyM[1]}`;
+        }
+        const ghM = text.match(/https:\/\/(?:boards|job-boards)\.greenhouse\.io\/(?:v1\/boards\/)?([a-zA-Z0-9_-]+)/);
+        if (ghM && ghM[1] && !["v1", "embed"].includes(ghM[1].toLowerCase())) {
+          return `https://boards.greenhouse.io/${ghM[1]}`;
+        }
+        const leverM = text.match(/https:\/\/jobs\.lever\.co\/([a-zA-Z0-9_-]+)/);
+        if (leverM && leverM[1]) {
+          return `https://jobs.lever.co/${leverM[1]}`;
+        }
+      }
+
       return null;
     });
   } catch {

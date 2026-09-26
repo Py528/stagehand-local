@@ -95,7 +95,19 @@ type SemanticTarget =
   | "signup";
 
 function parseSemanticNavTarget(instruction: string): SemanticTarget | null {
-  const lower = instruction.toLowerCase();
+  // Strip URLs from instruction so domains like "news.ycombinator.com" don't trigger keywords
+  const textOnly = instruction.replace(/https?:\/\/[^\s]+/gi, "").trim();
+  const lower = textOnly.toLowerCase();
+
+  // If the goal is an extraction or factual inquiry, do not hijack with navigation heuristics!
+  if (
+    /^(?:what|which|who|where|how|when|extract|summarize|find\s+(?:all|the\s+top|the\s+best)|think|analyze|compare|tell\s+me)\b/i.test(
+      lower
+    ) ||
+    /\b(?:what\s+are|points?|comments?|highest|lowest|ratio|top\s+\d+|list\s+all)\b/i.test(lower)
+  ) {
+    return null;
+  }
 
   const mapping: Array<{ keywords: string[]; target: SemanticTarget }> = [
     {
@@ -131,7 +143,7 @@ function parseSemanticNavTarget(instruction: string): SemanticTarget | null {
       target: "docs",
     },
     { keywords: ["about", "about us", "our story", "team"], target: "about" },
-    { keywords: ["blog", "articles", "news", "updates"], target: "blog" },
+    { keywords: ["blog", "articles", "blog post", "company blog", "press release"], target: "blog" },
     { keywords: ["login", "log in", "sign in"], target: "login" },
     { keywords: ["signup", "sign up", "register", "create account"], target: "signup" },
   ];
@@ -380,44 +392,181 @@ async function tryYouTubeFirstVideoClick(
 }
 
 /**
+ * State tracking for heuristic ad skip attempts to escalate to LLM after 3 failures,
+ * and semantic navigation target dedup to prevent infinite link-clicking loops.
+ */
+let adSkipAttempts = 0;
+let lastWatchUrl = "";
+let adSkipEscalatedToLLM = false;
+const navigatedSemanticTargets = new Set<string>();
+
+export function resetAdSkipState(): void {
+  adSkipAttempts = 0;
+  lastWatchUrl = "";
+  adSkipEscalatedToLLM = false;
+  navigatedSemanticTargets.clear();
+}
+
+/**
+ * Accurately determines if a YouTube video ad is currently active,
+ * distinguishing between live ads and persistent/empty DOM containers.
+ */
+export async function isYouTubeAdActive(page: any): Promise<boolean> {
+  return await page.evaluate(() => {
+    const player = document.getElementById("movie_player") as any;
+    if (!player) return false;
+
+    // 1. YouTube Player API truth: isAd flag and adState
+    const isAdData = player?.getVideoData?.()?.isAd === true;
+    const adState = typeof player?.getAdState === "function" ? player.getAdState() : -1;
+    if (isAdData || adState > 0) return true;
+
+    // 2. Class check on movie_player
+    const isPlayerAd =
+      player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting");
+    const hasAdClass = !!document.querySelector(".ad-showing, .ad-interrupting");
+
+    if (!isPlayerAd && !hasAdClass) return false;
+
+    // 3. Disambiguate lingering/empty ad containers:
+    // If ad-showing class is present, ensure there is an actual ad element/overlay with content.
+    const hasAdText = !!document.querySelector(
+      ".ytp-ad-text, .ytp-ad-preview-text, .ytp-ad-duration-remaining, .ytp-ad-skip-button-text"
+    );
+    const hasSkipBtn = !!document.querySelector(
+      ".ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, [class*='skip' i]"
+    );
+    const overlay = document.querySelector(".ytp-ad-player-overlay, .ytp-ad-player-overlay-layout") as HTMLElement | null;
+    const hasVisibleOverlay = overlay
+      ? overlay.offsetWidth > 0 && overlay.offsetHeight > 0 && overlay.innerHTML.trim().length > 0
+      : false;
+
+    // If player reports video is NOT an ad, and no ad text, skip button, or visible overlay exists,
+    // the container is lingering/stale and not an active ad.
+    if (player?.getVideoData?.()?.isAd === false && adState <= 0 && !hasAdText && !hasSkipBtn && !hasVisibleOverlay) {
+      return false;
+    }
+
+    return true;
+  }).catch(() => false);
+}
+
+/**
  * Invariant 1: Delta-State Verified YouTube Ad Skipper
- * Runs a tight internal poll (costs 0 planner steps) and only returns "clean"
- * when active ad states (.ad-showing / .ad-interrupting) are verified false on a fresh DOM read.
- * Never returns "clean" on evaluate failures or timeouts.
+ * Multi-vector skip:
+ * 1. Accelerates countdowns/unskippable ads via 16x playback speedup & mute.
+ * 2. Attempts YouTube player API skipAd().
+ * 3. Triggers both synthetic DOM events and Playwright native trusted CDP clicks.
+ * 4. Takes diagnostic debug dump and screenshot on attempt 1 when ad is showing.
+ * 5. Restores content video settings upon completion.
  */
 export async function skipYouTubeAdWithVerification(
   page: any,
-  maxWaitMs = 15000
+  maxWaitMs = 8000,
+  isFirstAttempt = false
 ): Promise<"clean" | "timeout"> {
   const start = Date.now();
+  let debugDumped = false;
 
   while (Date.now() - start < maxWaitMs) {
-    const state = await page.evaluate(() => {
+    const adShowing = await isYouTubeAdActive(page);
+
+    if (!adShowing) {
+      // Small settle check to guard against transient transitions between back-to-back ads
+      await sleep(250);
+      const confirmedGone = !(await isYouTubeAdActive(page));
+      if (confirmedGone) {
+        // Restore content video settings
+        await page.evaluate(() => {
+          const video = document.querySelector(
+            "#movie_player video, video.html5-main-video, video"
+          ) as HTMLVideoElement | null;
+          if (video) {
+            video.muted = false;
+            video.playbackRate = 1.0;
+          }
+        }).catch(() => {});
+        return "clean";
+      }
+    }
+
+    // Diagnostic dump on attempt 1 when ad is showing (temporary debug)
+    if (adShowing && isFirstAttempt && !debugDumped) {
+      debugDumped = true;
+      const debug = await page.evaluate(() => {
+        const skipCandidates = Array.from(document.querySelectorAll('[class*="skip" i]'))
+          .map((el) => ({
+            tag: el.tagName,
+            class: el.className,
+            text: (el as HTMLElement).innerText?.slice(0, 40),
+            visible: (el as HTMLElement).offsetParent !== null,
+            disabled: el.hasAttribute("disabled"),
+          }));
+        const adOverlay = document.querySelector(".ad-showing, .ad-interrupting")?.outerHTML?.slice(0, 300);
+        return { skipCandidates, adOverlay };
+      }).catch((e: any) => ({ error: String(e) }));
+      console.log("🔍 AD DEBUG:", JSON.stringify(debug, null, 2));
+      await page.screenshot({ path: `debug-ad-${Date.now()}.png` }).catch(() => {});
+    }
+
+    // 1. In-page evaluate: speedup, skipAd call, synthetic clicks, countdown acceleration
+    const domResult = await page.evaluate(() => {
       const player = document.getElementById("movie_player") as any;
-      const isPlayerAd = player
-        ? player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting")
-        : false;
-      const hasAdClass = !!document.querySelector(".ad-showing, .ad-interrupting");
-      const isAdData = player?.getVideoData?.()?.isAd === true;
 
-      const adShowing = isPlayerAd || hasAdClass || isAdData;
-
-      if (!adShowing) {
-        return { adShowing: false, skipClicked: false };
+      // Call YouTube player API skip
+      if (player && typeof player.skipAd === "function") {
+        try { player.skipAd(); } catch {}
       }
 
-      // Check for active skip buttons across modern YouTube variants
+      // Check if ad is actively playing according to player data
+      const isLiveAd =
+        player?.getVideoData?.()?.isAd === true ||
+        player?.classList?.contains("ad-showing") ||
+        player?.classList?.contains("ad-interrupting");
+
+      const video = document.querySelector(
+        "#movie_player video, video.html5-main-video, video"
+      ) as HTMLVideoElement | null;
+
+      if (video) {
+        if (isLiveAd) {
+          try {
+            video.muted = true;
+            video.playbackRate = 16;
+            if (video.paused) video.play().catch(() => {});
+          } catch {}
+
+          // ONLY fast-forward short unskippable bumper/pre-roll ads (duration <= 30s)
+          // NEVER touch currentTime for longer videos or content videos!
+          if (isFinite(video.duration) && video.duration > 0 && video.duration <= 30) {
+            try {
+              video.currentTime = video.duration;
+            } catch {}
+          }
+        } else {
+          // Content video is active — ensure normal speed and unmuted
+          try {
+            video.playbackRate = 1.0;
+            video.muted = false;
+          } catch {}
+        }
+      }
+
+      // Scan for skip buttons
       const skipSelectors = [
         ".ytp-skip-ad-button",
         ".ytp-ad-skip-button",
         ".ytp-ad-skip-button-modern",
         "button.ytp-ad-skip-button",
         "button.ytp-ad-skip-button-modern",
-        '[id^="skip-button"] button',
         ".ytp-ad-skip-button-container button",
         ".ytp-ad-skip-button-slot button",
-        'button[class*="skip"]',
+        '[id^="skip-button"] button',
+        ".ytp-ad-skip-button-text",
+        'button[class*="skip" i]',
+        '[aria-label*="skip" i]',
         ".ytp-ad-overlay-close-button",
+        ".ytp-ad-text.ytp-ad-skip-button-text",
       ];
       const candidates = Array.from(
         document.querySelectorAll(skipSelectors.join(", "))
@@ -430,54 +579,76 @@ export async function skipYouTubeAdWithVerification(
       });
 
       if (skipBtn) {
+        // Synthetic events
+        const opts = { bubbles: true, cancelable: true, view: window };
+        skipBtn.dispatchEvent(new PointerEvent("pointerdown", opts));
+        skipBtn.dispatchEvent(new MouseEvent("mousedown", opts));
+        skipBtn.dispatchEvent(new PointerEvent("pointerup", opts));
+        skipBtn.dispatchEvent(new MouseEvent("mouseup", opts));
         skipBtn.click();
-        skipBtn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-        if (player && typeof player.skipAd === "function") {
-          try { player.skipAd(); } catch {}
-        }
-        return { adShowing: true, skipClicked: true };
+        (skipBtn.closest("button") || skipBtn).click();
+
+        const rect = skipBtn.getBoundingClientRect();
+        return {
+          found: true,
+          rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+        };
       }
 
-      // Try fast-forwarding unskippable short ad videos
-      const adVideo = document.querySelector(".ad-showing video, video.html5-main-video") as HTMLVideoElement | null;
-      if (adVideo && isFinite(adVideo.duration) && adVideo.duration > 0 && adVideo.duration <= 35) {
-        try {
-          adVideo.currentTime = adVideo.duration;
-        } catch {}
-      }
-
-      return { adShowing: true, skipClicked: false };
+      return { found: false, rect: null };
     }).catch(() => null);
 
-    if (state === null) {
-      // Evaluate failed (frame transition/detach) — wait and retry, don't conclude clean
-      await sleep(500);
-      continue;
+    // 2. Playwright native trusted CDP mouse click (hardware-level click with isTrusted: true)
+    if (domResult?.found && domResult.rect && typeof page.mouse?.click === "function") {
+      const x = Math.round(domResult.rect.x + domResult.rect.width / 2);
+      const y = Math.round(domResult.rect.y + domResult.rect.height / 2);
+      if (x > 0 && y > 0) {
+        await page.mouse.click(x, y).catch(() => {});
+      }
     }
 
-    if (!state.adShowing) {
-      return "clean"; // Genuinely verified gone
+    // 3. Playwright native locator clicks
+    if (typeof page.locator === "function") {
+      for (const sel of [
+        ".ytp-skip-ad-button",
+        ".ytp-ad-skip-button",
+        ".ytp-ad-skip-button-modern",
+        "button.ytp-ad-skip-button",
+        "button.ytp-ad-skip-button-modern",
+        ".ytp-ad-skip-button-container button",
+        ".ytp-ad-skip-button-slot button",
+        '[id^="skip-button"] button',
+        ".ytp-ad-overlay-close-button",
+      ]) {
+        try {
+          const loc = page.locator(sel).first();
+          if (await loc.isVisible().catch(() => false)) {
+            await loc.click({ force: true, timeout: 400 }).catch(() => {});
+            break;
+          }
+        } catch {}
+      }
     }
 
-    if (state.skipClicked) {
-      await sleep(600); // Give the click time to register and state to flip
-      continue;
-    }
-
-    await sleep(800); // Wait for countdown to tick down
+    await sleep(500);
   }
 
-  // Final verification check — evaluate failure must return false (timeout, not clean)
-  const isGone = await page.evaluate(() => {
-    const player = document.getElementById("movie_player") as any;
-    const isPlayerAd = player
-      ? player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting")
-      : false;
-    const hasAdClass = !!document.querySelector(".ad-showing, .ad-interrupting");
-    return !isPlayerAd && !hasAdClass;
-  }).catch(() => false);
+  // Final check
+  const isGone = !(await isYouTubeAdActive(page));
+  if (isGone) {
+    await page.evaluate(() => {
+      const video = document.querySelector(
+        "#movie_player video, video.html5-main-video, video"
+      ) as HTMLVideoElement | null;
+      if (video) {
+        video.muted = false;
+        video.playbackRate = 1.0;
+      }
+    }).catch(() => {});
+    return "clean";
+  }
 
-  return isGone ? "clean" : "timeout";
+  return "timeout";
 }
 
 /**
@@ -507,6 +678,10 @@ export async function seekAndVerifyYouTube(
             video.currentTime += targetSeconds;
           }
           if (video.paused) video.play().catch(() => {});
+        }
+        if (video) {
+          video.playbackRate = 1.0;
+          video.muted = false;
         }
       },
       { targetSeconds, isAbsolute }
@@ -573,13 +748,46 @@ async function tryYouTubeWatchPageCheck(
   const targetSeconds = targetPlan?.timeOffsetSeconds ?? null;
   const isAbsolute = targetPlan?.isAbsoluteSeek ?? true;
 
-  // 1. Invariant 1: Delta-State Verified Ad Skip (tight internal poll, 0 planner steps)
-  const adResult = await skipYouTubeAdWithVerification(page, 15000);
-  if (adResult !== "clean") {
-    return {
-      description: `⚡ Heuristic: Video pre-roll ad in progress, waiting for stream...`,
-      continueLoop: true,
-    };
+  // 1. Invariant 1: Delta-State Verified Ad Skip with 3-attempt escalation to LLM
+  if (url !== lastWatchUrl) {
+    lastWatchUrl = url;
+    adSkipAttempts = 0;
+    adSkipEscalatedToLLM = false;
+  }
+
+  // If already escalated to LLM for this ad:
+  if (adSkipEscalatedToLLM) {
+    const stillAd = await isYouTubeAdActive(page);
+    if (stillAd) {
+      console.log(`   🤖 YouTube ad still active — yielding to LLM planner for action...`);
+      return null; // Fall through to LLM planner!
+    } else {
+      // Ad has ended (either cleared by LLM or completed playback)
+      adSkipEscalatedToLLM = false;
+      adSkipAttempts = 0;
+    }
+  }
+
+  const isAd = await isYouTubeAdActive(page);
+  if (isAd) {
+    adSkipAttempts++;
+    const isFirstAttempt = adSkipAttempts === 1;
+
+    const adResult = await skipYouTubeAdWithVerification(page, 7000, isFirstAttempt);
+    if (adResult !== "clean") {
+      if (adSkipAttempts >= 3) {
+        console.log(`   ⚠️ Heuristic ad skipping failed after 3 attempts — escalating to LLM planner.`);
+        adSkipEscalatedToLLM = true;
+        return null; // Fall through to LLM planner!
+      }
+      return {
+        description: `⚡ Heuristic: Video pre-roll ad in progress (attempt ${adSkipAttempts}/3), waiting for stream...`,
+        continueLoop: true,
+      };
+    }
+    // Ad was cleanly bypassed/skipped!
+    adSkipAttempts = 0;
+    adSkipEscalatedToLLM = false;
   }
 
   // 2. Hydration Check: wait up to 3.5s for video metadata and real title to hydrate
@@ -617,6 +825,10 @@ async function tryYouTubeWatchPageCheck(
       if (player?.playVideo) player.playVideo();
       const video = document.querySelector("#movie_player video, video.html5-main-video, video") as HTMLVideoElement | null;
       if (video?.paused) video.play().catch(() => {});
+      if (video) {
+        video.playbackRate = 1.0;
+        video.muted = false;
+      }
     }).catch(() => {});
   }
 
@@ -714,6 +926,46 @@ async function tryGoogleSearchFastHop(
   return null;
 }
 
+function isAlreadyOnTargetPage(url: string, target: SemanticTarget): boolean {
+  let pathname = "";
+  try {
+    pathname = new URL(url).pathname.toLowerCase();
+  } catch {
+    pathname = url.toLowerCase();
+  }
+  const lowerUrl = url.toLowerCase();
+
+  switch (target) {
+    case "careers":
+      return (
+        pathname.includes("/career") ||
+        pathname.includes("/job") ||
+        pathname.includes("/opening") ||
+        pathname.includes("/position") ||
+        lowerUrl.includes("ashbyhq.com") ||
+        lowerUrl.includes("greenhouse.io") ||
+        lowerUrl.includes("lever.co") ||
+        lowerUrl.includes("workday.com")
+      );
+    case "pricing":
+      return pathname.includes("/pricing") || pathname.includes("/plan");
+    case "contact":
+      return pathname.includes("/contact") || pathname.includes("/support");
+    case "docs":
+      return pathname.includes("/doc") || pathname.includes("/developer") || pathname.includes("/api");
+    case "about":
+      return pathname.includes("/about") || pathname.includes("/team") || pathname.includes("/our-story");
+    case "blog":
+      return pathname.includes("/blog") || pathname.includes("/article") || pathname.includes("/news");
+    case "login":
+      return pathname.includes("/login") || pathname.includes("/signin") || pathname.includes("/sign-in");
+    case "signup":
+      return pathname.includes("/signup") || pathname.includes("/register") || pathname.includes("/sign-up");
+    default:
+      return false;
+  }
+}
+
 /**
  * Navigate to a semantic subpage (careers, pricing, contact, etc.)
  * by scanning for common link patterns in the current page's navigation.
@@ -734,6 +986,21 @@ async function trySemanticNavigation(
   const target = parseSemanticNavTarget(goal);
   if (!target) return null;
 
+  // Guard 1: If already on target page, yield to extractor / LLM planner!
+  if (isAlreadyOnTargetPage(url, target)) {
+    return null;
+  }
+
+  // Guard 2: Never repeat navigation to the same target on the same domain
+  let domain = "";
+  try {
+    domain = new URL(url).hostname;
+  } catch {}
+  const navKey = `${domain}:${target}`;
+  if (navigatedSemanticTargets.has(navKey)) {
+    return null;
+  }
+
   const selectorMap: Record<SemanticTarget, string> = {
     careers:
       'a[href*="ashbyhq.com" i], a[href*="greenhouse.io" i], a[href*="lever.co" i], a[href*="workday.com" i], a[href*="career" i], a[href*="jobs" i], a[href*="job-openings" i], a[href*="join" i], a[href*="hiring" i]',
@@ -750,24 +1017,62 @@ async function trySemanticNavigation(
   const selector = selectorMap[target];
   if (!selector) return null;
 
-  const clicked = await page.evaluate((sel: string) => {
-    const links = document.querySelectorAll(sel);
-    for (const link of links) {
-      const el = link as HTMLElement;
+  const urlBefore = await page.url().catch(() => url);
+
+  const clicked = await page.evaluate(
+    ({ sel, currentUrl }: { sel: string; currentUrl: string }) => {
+      let curOrigin = "";
+      let curPath = "";
       try {
-        const style = window.getComputedStyle(el);
-        if (style.display === "none" || style.visibility === "hidden") continue;
-      } catch {
-        continue;
+        const u = new URL(currentUrl);
+        curOrigin = u.origin;
+        curPath = u.pathname.replace(/\/$/, "");
+      } catch {}
+
+      const links = document.querySelectorAll(sel);
+      for (const link of links) {
+        const el = link as HTMLElement;
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.display === "none" || style.visibility === "hidden") continue;
+        } catch {
+          continue;
+        }
+
+        // Guard 3: Ignore anchor hash links (#jobs) or links to the current page
+        const href = (el as HTMLAnchorElement).href;
+        if (href) {
+          try {
+            const targetUrl = new URL(href, currentUrl);
+            if (
+              targetUrl.origin === curOrigin &&
+              targetUrl.pathname.replace(/\/$/, "") === curPath
+            ) {
+              continue;
+            }
+          } catch {}
+        }
+
+        el.click();
+        return (el as HTMLAnchorElement).href || true;
       }
-      el.click();
-      return (el as HTMLAnchorElement).href || true;
-    }
-    return null;
-  }, selector).catch(() => null);
+      return null;
+    },
+    { sel: selector, currentUrl: url }
+  ).catch(() => null);
 
   if (clicked) {
-    await sleep(2000);
+    await sleep(1500);
+    const urlAfter = await page.url().catch(() => urlBefore);
+    const cleanBefore = urlBefore.split("#")[0].replace(/\/$/, "");
+    const cleanAfter = urlAfter.split("#")[0].replace(/\/$/, "");
+
+    // Delta-State Verification: if URL didn't change, no actual navigation occurred!
+    if (cleanBefore === cleanAfter) {
+      return null;
+    }
+
+    navigatedSemanticTargets.add(navKey);
     return {
       description: `⚡ Heuristic: Navigated to ${target} page via link click`,
       continueLoop: true,

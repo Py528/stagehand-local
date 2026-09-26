@@ -26,7 +26,7 @@ import {
   buildPlannerSnapshot,
   distillGoogleSearch,
 } from "./distill.js";
-import { tryHeuristic } from "./heuristics.js";
+import { tryHeuristic, resetAdSkipState } from "./heuristics.js";
 import { compileGoal, type ExecutionPlan } from "./compiler.js";
 import { handleInterstitials } from "./interstitial.js";
 import { playbooks, autoLearnFromPage, tryDirectAtsFetch, findAtsUrlOnPage } from "./playbook.js";
@@ -134,7 +134,7 @@ export async function extractText(sh: Stagehand, instruction: string, page: any)
   return "";
 }
 
-/** Check if extraction result is empty/trivial or just element IDs. */
+/** Check if extraction result is empty/trivial, element IDs, or degraded N/A data. */
 export function isExtractionValid(text: string): boolean {
   if (!text || text.length < 10) return false;
   // Common empty patterns from Stagehand
@@ -144,6 +144,34 @@ export function isExtractionValid(text: string): boolean {
   // If text is purely a list of element IDs like "0-5710, 0-5967, 0-5999" without real content
   const idOnlyPattern = /^(\s*\d+-\d+\s*[,;\s]*)+$/;
   if (idOnlyPattern.test(text.trim())) return false;
+
+  // Structural self-verification: If JSON array of objects, verify data isn't mostly "N/A" / "Unknown" / null
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      let invalidCount = 0;
+      for (const item of parsed) {
+        if (!item || typeof item !== "object") continue;
+        const titleVal = String(
+          item.title ?? item.name ?? item.role ?? item.item ?? item.description ?? ""
+        ).trim().toLowerCase();
+        if (
+          !titleVal ||
+          titleVal === "n/a" ||
+          titleVal === "unknown" ||
+          titleVal === "null" ||
+          titleVal === "none" ||
+          titleVal === "undefined"
+        ) {
+          invalidCount++;
+        }
+      }
+      // If more than 35% of items have N/A / Unknown title, reject this degraded extraction!
+      if (invalidCount / parsed.length > 0.35) {
+        return false;
+      }
+    }
+  } catch {}
 
   return true;
 }
@@ -314,6 +342,7 @@ export async function runAgent(
 ): Promise<string | undefined> {
   console.log(`\n🤖 Agent: "${goal}"\n`);
   resetSessionMetrics();
+  resetAdSkipState();
 
   // ─── TIER 0: Compile Goal Contract at t=0 (<300ms) ───
   let compiledPlan: ExecutionPlan | null = null;

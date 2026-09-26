@@ -7,7 +7,7 @@
       "ashbyhq.com"
     ],
     "shortcuts": {
-      "careersUrl": "https://roboflow.com/careers"
+      "careersUrl": "https://roboflow.com/careers#jobs"
     },
     "endpoints": [
       {
@@ -28,8 +28,8 @@
     "selectors": [],
     "meta": {
       "firstSeen": "2026-09-26T09:28:28.840Z",
-      "lastSeen": "2026-09-26T09:28:28.864Z",
-      "visitCount": 2,
+      "lastSeen": "2026-09-26T12:39:40.624Z",
+      "visitCount": 3,
       "successRate": 1,
       "successCount": 1
     }
@@ -72,100 +72,100 @@
       {
         "urlPattern": "/s/i/youtube_fill_experimental/gaming/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.347Z"
+        "lastVerified": "2026-09-26T12:37:38.723Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/help_circle/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.347Z"
+        "lastVerified": "2026-09-26T12:37:38.722Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/gaming/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.347Z"
+        "lastVerified": "2026-09-26T12:37:38.723Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/copy/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.347Z"
+        "lastVerified": "2026-09-26T12:37:38.723Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/clapperboard/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.347Z"
+        "lastVerified": "2026-09-26T12:37:38.724Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/clapperboard/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.348Z"
+        "lastVerified": "2026-09-26T12:37:38.724Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/alert_bubble/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 8,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.348Z"
+        "lastVerified": "2026-09-26T12:37:38.724Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/news/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 7,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.348Z"
+        "lastVerified": "2026-09-26T12:37:38.725Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/search/v15/24px.svg",
         "purpose": "search_results",
-        "successCount": 3,
+        "successCount": 7,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.348Z"
+        "lastVerified": "2026-09-26T12:37:38.725Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/video_camera_add/v2/24px.svg",
         "purpose": "media_metadata",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.348Z"
+        "lastVerified": "2026-09-26T12:37:38.725Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/live/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.349Z"
+        "lastVerified": "2026-09-26T12:37:38.726Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/volume_mute/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.349Z"
+        "lastVerified": "2026-09-26T12:37:38.727Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/volume_mute/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.349Z"
+        "lastVerified": "2026-09-26T12:37:38.726Z"
       },
       {
         "urlPattern": "/youtubei/v1/player",
         "purpose": "media_metadata",
-        "successCount": 1,
+        "successCount": 2,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T11:41:23.704Z"
+        "lastVerified": "2026-09-26T12:36:19.785Z"
       },
       {
         "urlPattern": "{\"itag\":18,\"mimeType\":\"video/mp4; codecs=\\\"avc1.42001E, mp4a.40.2\\\"\",\"bitrate\":442312,\"width\":640,\"height\":360,\"lastModified\":\"1780143080781553\",\"contentLength\":\"17106009\",\"quality\":\"medium\",\"fps\":24,\"qualityLabel\":\"360p\",\"projectionType\":\"RECTANGULAR\",\"averageBitrate\":442227,\"audioQuality\":\"AUDIO_QUALITY_LOW\",\"approxDurationMs\":\"309452\",\"audioSampleRate\":\"44100\",\"audioChannels\":2,\"signatureCipher\":\"s=oUoU%3D%3DU%3DUTOyQXmEQP6DIVKd_7UOt6JVwL_F6m7g78R1qvQfW85AEiAhqJbn%3DUtuYauq_pyGqq_Eah7Pc72SUzUIJXdCSFZP_PAhIgRwYJ2s0EAEA&sp=sig&url=https://rr1---sn-n5h25g3-2o9l.googlevideo.com/videoplayback%3Fexpire%3D1790444447%26ei%3DP6-3au7MB-C188EP-d_ogQI%26ip%3D103.150.139.13%26id%3Do-AHNljSu6fzGNZayo2DIWbYAGYm1aiw_fHvLiTEydTL8A%26itag%3D18%26source%3Dyoutube%26requ\n\n[/api/timedtext",
@@ -177,33 +177,56 @@
       {
         "urlPattern": "/s/i/youtube_outline_experimental/history/v1/24px.svg",
         "purpose": "page_data",
-        "successCount": 2,
+        "successCount": 4,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.346Z"
+        "lastVerified": "2026-09-26T12:24:40.888Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/volume_max/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 2,
+        "successCount": 7,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T11:54:08.633Z"
+        "lastVerified": "2026-09-26T12:37:38.727Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/volume_max/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 3,
+        "successCount": 8,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:06:44.349Z"
+        "lastVerified": "2026-09-26T12:37:38.726Z"
+      },
+      {
+        "urlPattern": "/s/i/youtube_fill_experimental/video/v3/24px.svg",
+        "purpose": "media_metadata",
+        "successCount": 1,
+        "failureCount": 0,
+        "lastVerified": "2026-09-26T12:36:19.785Z"
       }
     ],
     "selectors": [],
     "meta": {
       "firstSeen": "2026-09-26T11:00:14.790Z",
-      "lastSeen": "2026-09-26T12:06:44.344Z",
-      "visitCount": 9,
-      "successRate": 0.7777777777777778,
-      "successCount": 7
+      "lastSeen": "2026-09-26T12:37:38.721Z",
+      "visitCount": 14,
+      "successRate": 0.7857142857142857,
+      "successCount": 11
     },
     "archetypeId": "archetype_youtube_spa"
+  },
+  "news.ycombinator.com": {
+    "schemaVersion": 1,
+    "domain": "news.ycombinator.com",
+    "category": "unknown",
+    "techHints": [],
+    "shortcuts": {},
+    "endpoints": [],
+    "selectors": [],
+    "meta": {
+      "firstSeen": "2026-09-26T12:42:30.694Z",
+      "lastSeen": "2026-09-26T12:51:58.789Z",
+      "visitCount": 3,
+      "successRate": 0.5,
+      "successCount": 1
+    }
   }
 }
