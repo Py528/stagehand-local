@@ -40,6 +40,7 @@ export const DEFAULT_CONFIG: Config = {
   browser: {
     headless: false,
     defaultTimeout: 30000,
+    useOwnBrowser: false,
   },
   agent: {
     maxSteps: 10,
@@ -116,4 +117,8 @@ if (process.env.MODEL_ID) cfg.llm.modelId = process.env.MODEL_ID;
 if (process.env.HEADLESS) cfg.browser.headless = process.env.HEADLESS === "true";
 if (hasCliFlag(["--headless"])) cfg.browser.headless = true;
 if (hasCliFlag(["--headed", "--no-headless"])) cfg.browser.headless = false;
+if (hasCliFlag(["--use-own-browser", "--my-browser", "--own-browser"])) cfg.browser.useOwnBrowser = true;
+if (process.env.USE_OWN_BROWSER) cfg.browser.useOwnBrowser = ["true", "1", "yes"].includes(process.env.USE_OWN_BROWSER.toLowerCase());
+if (process.env.BROWSER_PATH) cfg.browser.browserBinaryPath = process.env.BROWSER_PATH;
+if (process.env.BROWSER_USER_DATA) cfg.browser.browserUserDataDir = process.env.BROWSER_USER_DATA;
 if (process.env.MAX_STEPS) cfg.agent.maxSteps = parseInt(process.env.MAX_STEPS, 10);

@@ -1,10 +1,8 @@
-import { localBrowser, Stagehand } from "@browserbasehq/stagehand";
 import { cfg, getCliOption, hasCliFlag } from "./src/config.js";
 import { isNetworkOrCdpError } from "./src/utils.js";
-import { createStagehandModelHandler } from "./src/llm.js";
 import { runCommand, startInteractiveCli, printHelp } from "./src/cli.js";
 import { startWebServer } from "./src/server.js";
-import { setupRouteBlocking } from "./src/browser.js";
+import { getOrSwitchBrowser, closeActiveBrowserSession } from "./src/browser_manager.js";
 
 async function main() {
 
@@ -33,7 +31,10 @@ async function main() {
       a === "--help" ||
       a === "--headless" ||
       a === "--headed" ||
-      a === "--no-headless"
+      a === "--no-headless" ||
+      a === "--use-own-browser" ||
+      a === "--my-browser" ||
+      a === "--own-browser"
     ) {
       continue;
     }
@@ -50,28 +51,15 @@ async function main() {
   const prompt = promptTokens.join(" ").trim();
   const oneShot = prompt && !interactive && !isUiMode;
 
-  let browser: any;
-  let sh: any;
-
+  let sessionState: any;
   try {
-    console.log("🚀 Launching browser...");
-    browser = await localBrowser.launch({ headless: cfg.browser.headless });
-
-    console.log(`🧠 LLM: ${cfg.llm.modelId} @ ${cfg.llm.baseURL}`);
-    sh = await Stagehand.create({
-      browser,
-      model: createStagehandModelHandler(),
-      logging: { level: "warn" },
-    });
-    await setupRouteBlocking(browser.context);
+    sessionState = await getOrSwitchBrowser();
   } catch (err: any) {
-
     console.error("❌ Initialization error:", err?.message || err);
     process.exit(isNetworkOrCdpError(err) ? 2 : 1);
   }
 
-  const pages = await browser.context.pages();
-  const page = pages.length > 0 ? pages[0] : await browser.context.newPage();
+  const { browser, sh, page } = sessionState;
 
   // Mode 1: Web UI Server
   if (isUiMode) {
@@ -96,16 +84,14 @@ async function main() {
       console.error("❌", e?.message || e);
       exitCode = isNetworkOrCdpError(e) ? 2 : 1;
     } finally {
-      await sh.close().catch(() => {});
-      await browser.close().catch(() => {});
+      await closeActiveBrowserSession();
       process.exit(exitCode);
     }
   }
 
   // Mode 3: Interactive CLI
   await startInteractiveCli(sh, page, prompt);
-  await sh.close().catch(() => {});
-  await browser.close().catch(() => {});
+  await closeActiveBrowserSession();
   process.exit(0);
 }
 

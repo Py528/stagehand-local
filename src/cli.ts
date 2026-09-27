@@ -90,6 +90,7 @@ export function printHelp(): void {
 │    --port <number>           Web UI port (default: 7788)                     │
 │    --headless                Run browser in headless mode                    │
 │    --headed, --no-headless   Run browser in headed mode (visible window)      │
+│    --use-own-browser         Run with default desktop browser & real sessions │
 │    -c, --config <path>       Specify custom config.json path                 │
 │    -h, --help                Show command help                               │
 │    "<instruction>"           Execute one-shot prompt and exit                │

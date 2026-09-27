@@ -14,9 +14,19 @@ import { activePage, captureScreenshotBase64 } from "./browser.js";
 import { runAgent, fastUrlQuestion } from "./planner.js";
 import { runScan } from "./scan.js";
 import { ts } from "./utils.js";
+import {
+  getOrSwitchBrowser,
+  getCurrentBrowserMode,
+  getActiveSessionState,
+  type BrowserMode,
+} from "./browser_manager.js";
+import { detectDefaultBrowser, isCdpActive } from "./browser_resolver.js";
 
 export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Server {
   const sseClients = new Set<http.ServerResponse>();
+
+  let currentSh = sh;
+  let currentPage = page;
 
   function broadcast(event: string, data: any) {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -56,9 +66,62 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
       return;
     }
 
+    // API: Browser Status & System Detection
+    if (url.pathname === "/api/browser/status" && req.method === "GET") {
+      const detected = detectDefaultBrowser();
+      const cdpRunning = await isCdpActive("127.0.0.1", 9222);
+      const mode = getCurrentBrowserMode();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          mode,
+          detected,
+          cdpRunning,
+          browserName: getActiveSessionState()?.browserName || (mode === "own" ? detected?.name || "Desktop Browser" : "Playwright Chromium"),
+        })
+      );
+      return;
+    }
+
+    // API: Switch Browser Mode (Clean vs Own)
+    if (url.pathname === "/api/browser/mode" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const { mode } = JSON.parse(body || "{}");
+          if (mode !== "clean" && mode !== "own") {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid mode. Use 'clean' or 'own'." }));
+            return;
+          }
+          broadcast("browser_switching", { mode, ts: ts() });
+          const newSession = await getOrSwitchBrowser(mode as BrowserMode);
+          currentSh = newSession.sh;
+          currentPage = newSession.page;
+          const activePg = await activePage(currentSh, currentPage);
+          const screenshot = await captureScreenshotBase64(activePg);
+          const currentTitle = await activePg.title().catch(() => "");
+          broadcast("browser_switched", {
+            mode,
+            browserName: newSession.browserName,
+            title: currentTitle,
+            screenshot,
+            ts: ts(),
+          });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "switched", mode, browserName: newSession.browserName }));
+        } catch (e: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: e?.message || String(e) }));
+        }
+      });
+      return;
+    }
+
     // API: Current state
     if (url.pathname === "/api/status" && req.method === "GET") {
-      const activePg = await activePage(sh, page);
+      const activePg = await activePage(currentSh, currentPage);
       const currentUrl = await activePg.url().catch(() => "about:blank");
       const currentTitle = await activePg.title().catch(() => "");
       const screenshot = await captureScreenshotBase64(activePg);
@@ -69,6 +132,7 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
           running: isAgentRunning,
           page: { url: currentUrl, title: currentTitle, screenshot },
           config: cfg,
+          browserMode: getCurrentBrowserMode(),
           history: session.history,
           conversation: session.conversation,
           attachedFiles: session.attachedFiles,
@@ -79,7 +143,7 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
 
     // API: Screenshot capture
     if (url.pathname === "/api/screenshot" && req.method === "GET") {
-      const activePg = await activePage(sh, page);
+      const activePg = await activePage(currentSh, currentPage);
       const screenshot = await captureScreenshotBase64(activePg);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ screenshot }));
@@ -92,7 +156,7 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
       req.on("data", (chunk) => (body += chunk));
       req.on("end", async () => {
         try {
-          const { prompt, mode } = JSON.parse(body || "{}");
+          const { prompt, mode, browserMode } = JSON.parse(body || "{}");
           if (!prompt) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Missing prompt" }));
@@ -116,15 +180,23 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
             return;
           }
 
+          // Switch browser if requested mode differs from active mode
+          if (browserMode && (browserMode === "clean" || browserMode === "own") && browserMode !== getCurrentBrowserMode()) {
+            broadcast("browser_switching", { mode: browserMode, ts: ts() });
+            const newSession = await getOrSwitchBrowser(browserMode);
+            currentSh = newSession.sh;
+            currentPage = newSession.page;
+          }
+
           isAgentRunning = true;
-          broadcast("agent_start", { prompt: resolvedPrompt, mode, ts: ts() });
+          broadcast("agent_start", { prompt: resolvedPrompt, mode, browserMode: getCurrentBrowserMode(), ts: ts() });
 
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "started", prompt: resolvedPrompt }));
 
           // Execute agent asynchronously and stream steps
           (async () => {
-            const activePg = await activePage(sh, page);
+            const activePg = await activePage(currentSh, currentPage);
             try {
               addToConversation({ role: "user", content: resolvedPrompt, label: "user_goal" });
 
@@ -143,7 +215,7 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
                 return;
               }
 
-              const result = await runAgent(resolvedPrompt, sh, activePg, (stepInfo) => {
+              const result = await runAgent(resolvedPrompt, currentSh, activePg, (stepInfo) => {
                 broadcast("agent_step", { ...stepInfo, ts: ts() });
               });
 
@@ -170,7 +242,7 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
       req.on("end", async () => {
         try {
           const { url: targetUrl, query } = JSON.parse(body || "{}");
-          const activePg = await activePage(sh, page);
+          const activePg = await activePage(currentSh, currentPage);
           broadcast("extract_start", { url: targetUrl, query });
 
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -178,7 +250,7 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
 
           (async () => {
             try {
-              await fastUrlQuestion(targetUrl, query, sh, activePg, (info) => {
+              await fastUrlQuestion(targetUrl, query, currentSh, activePg, (info) => {
                 broadcast("agent_step", { ...info, maxSteps: 3, plan: { action: "extract", instruction: query } });
               });
               const screenshot = await captureScreenshotBase64(activePg);
@@ -317,21 +389,31 @@ function getWebUiHtml(): string {
       box-shadow: 0 0 8px var(--warning);
       animation: pulse 1.5s infinite;
     }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.2); }
+    }
     main {
       flex: 1;
       padding: 1.5rem 2rem;
       display: grid;
-      grid-template-columns: 1.1fr 0.9fr;
+      grid-template-columns: 1fr 1.2fr;
       gap: 1.5rem;
       max-width: 1700px;
       margin: 0 auto;
       width: 100%;
     }
+    @media (max-width: 1024px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .panel {
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
     .tabs {
       display: flex;
       gap: 0.5rem;
-      margin-bottom: 1rem;
       border-bottom: 1px solid var(--card-border);
       padding-bottom: 0.5rem;
     }
@@ -340,32 +422,105 @@ function getWebUiHtml(): string {
       border: none;
       color: var(--text-muted);
       font-family: inherit;
-      font-size: 0.95rem;
+      font-size: 0.9rem;
       font-weight: 500;
       padding: 0.5rem 1rem;
       border-radius: 8px;
       cursor: pointer;
       transition: all 0.2s;
     }
-    .tab-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+    .tab-btn:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.04);
+    }
     .tab-btn.active {
       color: white;
-      background: var(--accent);
-      box-shadow: 0 0 15px var(--accent-glow);
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.3);
     }
-    .panel {
-      background: var(--card-bg);
-      backdrop-filter: blur(16px);
+    .tab-content { display: none; }
+    .tab-content.active { display: flex; flex-direction: column; gap: 1rem; }
+
+    /* Browser Mode Radio Card Toggle */
+    .browser-mode-card {
+      background: rgba(15, 23, 42, 0.6);
       border: 1px solid var(--card-border);
-      border-radius: 16px;
-      padding: 1.5rem;
+      border-radius: 12px;
+      padding: 0.85rem 1rem;
+      margin-bottom: 0.25rem;
+    }
+    .browser-mode-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.6rem;
+    }
+    .browser-mode-title {
+      font-size: 0.82rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #93c5fd;
+    }
+    .detected-browser-pill {
+      font-size: 0.72rem;
+      padding: 0.18rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .radio-card-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    @media (max-width: 600px) {
+      .radio-card-group { grid-template-columns: 1fr; }
+    }
+    .radio-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.65rem;
+      padding: 0.7rem 0.85rem;
+      border-radius: 8px;
+      border: 1px solid var(--card-border);
+      background: rgba(0, 0, 0, 0.25);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      user-select: none;
+    }
+    .radio-card:hover {
+      border-color: rgba(59, 130, 246, 0.4);
+      background: rgba(59, 130, 246, 0.05);
+    }
+    .radio-card input[type="radio"] {
+      margin-top: 0.2rem;
+      accent-color: #3b82f6;
+      cursor: pointer;
+    }
+    .radio-card.active {
+      border-color: #3b82f6;
+      background: rgba(59, 130, 246, 0.12);
+      box-shadow: 0 0 12px rgba(59, 130, 246, 0.2);
+    }
+    .radio-card-content {
       display: flex;
       flex-direction: column;
-      gap: 1.25rem;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+      gap: 0.15rem;
     }
-    .tab-content { display: none; flex-direction: column; gap: 1.25rem; }
-    .tab-content.active { display: flex; }
+    .radio-title {
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #f3f4f6;
+    }
+    .radio-desc {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      line-height: 1.25;
+    }
+
     .input-group {
       display: flex;
       flex-direction: column;
@@ -529,6 +684,30 @@ function getWebUiHtml(): string {
 
       <!-- Agent Tab -->
       <div id="tab-agent" class="tab-content active">
+        <!-- Browser Mode Radio Toggle -->
+        <div class="browser-mode-card">
+          <div class="browser-mode-header">
+            <span class="browser-mode-title">🌐 Browser Environment</span>
+            <span id="detected-browser-pill" class="detected-browser-pill">🔍 Detecting...</span>
+          </div>
+          <div class="radio-card-group">
+            <label class="radio-card active" id="mode-clean-card" onclick="selectBrowserMode('clean')">
+              <input type="radio" name="browser-mode" id="radio-mode-clean" value="clean" checked onchange="selectBrowserMode('clean')">
+              <div class="radio-card-content">
+                <div class="radio-title">🌐 Clean Browser</div>
+                <div class="radio-desc">Fresh isolated Chromium instance (No accounts)</div>
+              </div>
+            </label>
+            <label class="radio-card" id="mode-own-card" onclick="selectBrowserMode('own')">
+              <input type="radio" name="browser-mode" id="radio-mode-own" value="own" onchange="selectBrowserMode('own')">
+              <div class="radio-card-content">
+                <div class="radio-title">👤 My Default Browser</div>
+                <div class="radio-desc">Uses your desktop browser with all logged-in sessions</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
         <div class="input-group">
           <label for="agent-prompt">Goal or Natural Language Instruction</label>
           <textarea id="agent-prompt" placeholder="e.g. go to youtube and play crown by txt and skip 1 min ahead of the video"></textarea>
@@ -603,6 +782,14 @@ function getWebUiHtml(): string {
           <label>Max Agent Steps</label>
           <input type="number" id="cfg-agent-steps" value="${cfg.agent.maxSteps}">
         </div>
+        <div class="input-group">
+          <label>Browser Binary Path</label>
+          <input type="text" id="cfg-browser-bin" value="${cfg.browser.browserBinaryPath || ''}" placeholder="Auto-detected default browser">
+        </div>
+        <div class="input-group">
+          <label>Browser User Data Dir</label>
+          <input type="text" id="cfg-browser-data" value="${cfg.browser.browserUserDataDir || ''}" placeholder="Leave empty to auto-clone session state">
+        </div>
         <button class="btn-primary" onclick="saveSettings()">
           <span>💾</span> Save Settings
         </button>
@@ -657,6 +844,61 @@ function getWebUiHtml(): string {
       } catch {}
     }
 
+    async function loadBrowserStatus() {
+      try {
+        const res = await fetch('/api/browser/status');
+        const data = await res.json();
+        const pill = document.getElementById('detected-browser-pill');
+        if (data.detected) {
+          pill.innerText = '✨ ' + data.detected.name + ' Detected';
+          pill.title = data.detected.binary;
+        } else {
+          pill.innerText = 'Chromium Ready';
+        }
+        if (data.mode === 'own') {
+          selectBrowserMode('own', false);
+        } else {
+          selectBrowserMode('clean', false);
+        }
+      } catch (e) {
+        console.error('Failed to load browser status', e);
+      }
+    }
+
+    async function selectBrowserMode(mode, triggerSwitch = true) {
+      const cleanRadio = document.getElementById('radio-mode-clean');
+      const ownRadio = document.getElementById('radio-mode-own');
+      const cleanCard = document.getElementById('mode-clean-card');
+      const ownCard = document.getElementById('mode-own-card');
+
+      if (cleanRadio) cleanRadio.checked = (mode === 'clean');
+      if (ownRadio) ownRadio.checked = (mode === 'own');
+      if (cleanCard) cleanCard.classList.toggle('active', mode === 'clean');
+      if (ownCard) ownCard.classList.toggle('active', mode === 'own');
+
+      if (triggerSwitch) {
+        appendLog('🔄 Switching browser to: ' + (mode === 'own' ? 'My Default Browser' : 'Clean Browser') + '...');
+        document.getElementById('status-dot').className = 'status-dot busy';
+        document.getElementById('status-text').innerText = 'Switching Browser...';
+        try {
+          const res = await fetch('/api/browser/mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode })
+          });
+          const data = await res.json();
+          appendLog('✅ Browser switched to: ' + data.browserName);
+          document.getElementById('status-dot').className = 'status-dot';
+          document.getElementById('status-text').innerText = 'Ready (' + (mode === 'own' ? 'My Browser' : 'Clean') + ')';
+          refreshScreenshot();
+        } catch (e) {
+          appendLog('❌ Failed to switch browser: ' + e.message);
+          document.getElementById('status-dot').className = 'status-dot';
+          document.getElementById('status-text').innerText = 'Ready';
+        }
+      }
+    }
+
     async function runAgentGoal() {
       const prompt = document.getElementById('agent-prompt').value.trim();
       if (!prompt) return;
@@ -664,13 +906,15 @@ function getWebUiHtml(): string {
       document.getElementById('status-dot').className = 'status-dot busy';
       document.getElementById('status-text').innerText = 'Running Agent...';
 
+      const selectedMode = document.querySelector('input[name="browser-mode"]:checked')?.value || 'clean';
+
       const timeline = document.getElementById('timeline');
-      timeline.innerHTML = '<div class="step-item"><div class="step-header">Started</div><div class="step-desc">' + prompt + '</div></div>';
+      timeline.innerHTML = '<div class="step-item"><div class="step-header">Started (' + (selectedMode === 'own' ? 'My Browser' : 'Clean') + ')</div><div class="step-desc">' + prompt + '</div></div>';
 
       await fetch('/api/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt })
+        body: JSON.stringify({ prompt, browserMode: selectedMode })
       });
     }
 
@@ -697,6 +941,10 @@ function getWebUiHtml(): string {
         },
         agent: {
           maxSteps: parseInt(document.getElementById('cfg-agent-steps').value, 10) || 10
+        },
+        browser: {
+          browserBinaryPath: document.getElementById('cfg-browser-bin').value.trim() || undefined,
+          browserUserDataDir: document.getElementById('cfg-browser-data').value.trim() || undefined
         }
       };
       await fetch('/api/config', {
@@ -733,6 +981,22 @@ function getWebUiHtml(): string {
       if (data.screenshot) updateScreenshot(data.screenshot);
     });
 
+    evt.addEventListener('browser_switching', (e) => {
+      const data = JSON.parse(e.data);
+      appendLog('🔄 Switching browser to: ' + (data.mode === 'own' ? 'My Default Browser' : 'Clean Browser') + '...');
+      document.getElementById('status-dot').className = 'status-dot busy';
+      document.getElementById('status-text').innerText = 'Switching Browser...';
+    });
+
+    evt.addEventListener('browser_switched', (e) => {
+      const data = JSON.parse(e.data);
+      appendLog('✅ Active browser: ' + data.browserName);
+      document.getElementById('status-dot').className = 'status-dot';
+      document.getElementById('status-text').innerText = 'Ready (' + (data.mode === 'own' ? 'My Browser' : 'Clean') + ')';
+      if (data.screenshot) updateScreenshot(data.screenshot);
+      if (data.title) document.getElementById('page-title').innerText = data.title;
+    });
+
     evt.addEventListener('extract_done', (e) => {
       const data = JSON.parse(e.data);
       document.getElementById('extract-btn').disabled = false;
@@ -742,6 +1006,7 @@ function getWebUiHtml(): string {
       if (data.screenshot) updateScreenshot(data.screenshot);
     });
 
+    loadBrowserStatus();
     refreshScreenshot();
   </script>
 </body>

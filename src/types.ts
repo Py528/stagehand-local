@@ -9,6 +9,10 @@ export interface LLMConfig {
 export interface BrowserConfig {
   headless: boolean;
   defaultTimeout: number;
+  useOwnBrowser?: boolean | undefined;
+  browserBinaryPath?: string | undefined;
+  browserUserDataDir?: string | undefined;
+  cdpUrl?: string | undefined;
 }
 
 export interface AgentConfig {

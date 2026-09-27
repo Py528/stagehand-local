@@ -184,11 +184,12 @@ Runs inside the browser via `page.evaluate()` in ~10–25ms:
 
 Run `npm run ui` (or `npx tsx index.ts --ui --port 7788`) to launch the built-in Web UI dashboard:
 
+- 🌐 **Browser Environment Radio Toggle**: Toggle between **Clean Browser** (isolated Playwright sandbox) and **My Default Browser** (runs with all your real logged-in sessions, cookies, and profiles from Google Chrome, Arc, Brave, or Edge with zero locking conflicts).
 - 🤖 **Agent Goal Runner**: Submit natural language instructions and stream step-by-step execution logs (`navigate`, `click`, `extract`, `done`) via Server-Sent Events (SSE).
 - 📸 **Live Screen Viewer**: Automatic and manual snapshot refresh showing the exact live state of the automated Chromium browser.
 - 🔍 **Quick Extract**: Single-click URL data extraction with immediate markdown synthesis.
 - 📋 **Batch CSV Scanner**: Upload and run CSV URL lists with real-time table progress and downloadable CSV output.
-- ⚙️ **Hot-Reload Settings**: Modify LLM endpoint, model ID, timeouts, and settling delays directly from the UI without restarting.
+- ⚙️ **Hot-Reload Settings**: Modify LLM endpoint, model ID, browser binary paths, timeouts, and settling delays directly from the UI without restarting.
 
 ---
 
