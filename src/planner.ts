@@ -16,6 +16,7 @@ import {
   sessionMetrics,
   resetSessionMetrics,
   logSessionMetrics,
+  validateAndResolveAttachments,
 } from "./conversation.js";
 import { activePage, navigate, dismissCookies, captureScreenshotBase64 } from "./browser.js";
 import type { PlanAction } from "./types.js";
@@ -341,6 +342,28 @@ export async function runAgent(
   onStep?: AgentStepCallback
 ): Promise<string | undefined> {
   console.log(`\n🤖 Agent: "${goal}"\n`);
+
+  // Precondition Validation: Verify any referenced attachments exist before a single planner step runs
+  const attachCheck = await validateAndResolveAttachments(goal);
+  if (!attachCheck.ok) {
+    const errorMsg = attachCheck.error || "Missing referenced attachment";
+    console.error(`\n❌ Precondition Failed: ${errorMsg}\n`);
+    if (onStep) {
+      onStep({
+        step: 1,
+        maxSteps: cfg.agent.maxSteps,
+        title: "Precondition Check",
+        url: "about:blank",
+        plan: { action: "done", message: errorMsg },
+        result: errorMsg,
+      });
+    }
+    session.lastAnswer = errorMsg;
+    addToConversation({ role: "assistant", content: errorMsg, label: "answer" });
+    return errorMsg;
+  }
+  goal = attachCheck.resolvedInput;
+
   resetSessionMetrics();
   resetAdSkipState();
 

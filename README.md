@@ -1,265 +1,28 @@
 # Stagehand Local 🎭🤖
 
-> Run **[Stagehand](https://github.com/browserbasehq/stagehand)** completely locally using your own LLM (such as `llama-server`, Ollama, vLLM, or LM Studio) with zero cloud AI dependencies.
-
-Stagehand Local combines Playwright with local model inference (optimized for models like Gemma 4 26B, Qwen 2.5 / 3.8 27B) into an interactive, high-performance web agent. It features a modern **Web UI Dashboard**, an **OpenCode-style Interactive CLI**, dynamic multi-step adaptive planning, strict Zod schema self-healing, DOM-level fast paths, zero-LLM cookie dismissal, anti-loop detection, and CSV batch scanning.
+> **Autonomous browser agent with a three-tier execution pipeline** — zero-LLM fast paths, ATS API shortcuts, and distilled DOM extraction that cuts token usage 70–90% vs. raw HTML or full AXTree dumps. Runs on any local OpenAI-compatible model (`llama-server`, Ollama, vLLM, LM Studio).
 
 ---
 
-## 🎯 What It Does
+```text
+$ npx tsx index.ts "find Vitest getting started guide and extract the CLI command for test coverage"
 
-Stagehand Local acts as an autonomous pair-navigator and data-extractor right in your browser or terminal:
+🚀 Launching browser...
+🧠 LLM: unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ4_XS @ http://127.0.0.1:8080/v1
+[1/10] 📍 "Blank" -> https://www.google.com/search?q=Vitest+getting+started+guide
+       ⚡ Heuristic: Direct SERP fast-hop to https://v1.vitest.dev/guide/ (0 tokens, 85ms)
+[2/10] 📍 "Getting Started | Vitest" (https://v1.vitest.dev/guide/)
+       🔍 In-page DOM probe matched code snippet: "vitest run --coverage" (0 tokens, 12ms)
 
-- 🌐 **Autonomous Multi-Step Browsing & Adaptive Planning**: Give it a high-level goal (`"go to youtube, search for lo-fi beats, play the first track, and skip 30 seconds in"`), and it will plan, locate interactive DOM elements, click, type, and verify progress. If search results are inconclusive, the agent dynamically adapts its plan and navigates into destination links.
-- 🖥️ **Modern Web UI Dashboard**: Run `npm run ui` for a full graphical interface with real-time SSE execution steps, live screenshot viewing, quick extraction, batch URL scanning, and settings management.
-- 🔍 **Natural Language Data Extraction**: Point it at any URL and ask a question (`"find all open remote backend roles and salaries"`). Rather than writing fragile CSS/XPath selectors, the agent analyzes the DOM and extracts clean, structured answers.
-- 🧠 **Cross-Task Contextual Reasoning**: Features a persistent conversation buffer across commands. You can paste reference documents (like your resume or project specs), have the agent browse multiple websites, and then query it (`think which company is the best fit for my skills?`) to reason over the collected data.
-- ⚡ **Zero-Overhead Search & Navigation**: Skips repetitive search engine homepages. Typing `youtube <query>`, `github <query>`, or `google <query>` takes you straight to results without wasting tokens on typing into search inputs.
-- 📋 **Batch CSV Web Processing**: Takes a CSV with hundreds of company or candidate URLs, systematically navigates each site, dismisses overlays, extracts target fields, and streams structured output to a new CSV in real time.
-- 🛠️ **Developer Inspection REPL**: An interactive CLI to explore the live page: list clickable elements (`observe`), capture screenshots (`screenshot`), switch tabs (`pages`), go back (`back`), and inspect session memory (`context`).
+🎉 The CLI command used to run test coverage in Vitest is `vitest run --coverage`.
 
----
-
-## 🖥️ Web UI Dashboard
-
-Stagehand Local includes a built-in, responsive Web UI dashboard built with real-time Server-Sent Events (SSE):
-
-```bash
-# Launch Web UI on default port 7788
-npm run ui
-# or
-npx tsx index.ts --ui --port 7788
-```
-
-Open your browser at `http://127.0.0.1:7788` to access:
-- 🤖 **Agent Goal Runner**: Submit natural language instructions and watch real-time step-by-step execution with live action logs (`navigate`, `click`, `extract`, `done`).
-- 📸 **Live Browser Screen Viewer**: Automatic and manual snapshot refresh showing the exact live state of the automated Chromium browser.
-- 🔍 **Quick Extract**: Single-click URL data extraction with immediate markdown synthesis.
-- 📋 **Batch CSV Scanner**: Upload and run CSV URL lists with real-time table progress and downloadable CSV output.
-- ⚙️ **Settings & Hot-Reload**: Modify LLM base URL, model ID, timeouts, DOM settling delays, and cookie patterns directly from the UI without restarting the server.
-
----
-
-## ⚙️ Modular Architecture
-
-The codebase is organized into clean, single-responsibility TypeScript modules under `src/`:
-
-```
-stagehand-local/
-├── src/
-│   ├── types.ts          # Core TypeScript interfaces (Config, SessionState, PlanAction, BatchResult)
-│   ├── config.ts         # Config loader/saver with hot-reload and CLI flag parsing
-│   ├── utils.ts          # Zod schema self-healing, JSON cleaner, retry/timeout wrappers, CDP helpers
-│   ├── conversation.ts   # Session state buffer, fact-pinning context manager, thinking mode Q&A
-│   ├── files.ts          # Inline @file parser, workspace scanner, PDF reader (pdf-parse), editor spawner
-│   ├── browser.ts        # Playwright lifecycle, DOM settling, zero-cost cookie dismissal, screenshots
-│   ├── distill.ts        # In-browser DOM distillation, SPA API interception, fast extract & snapshot builder
-│   ├── heuristics.ts     # Tier 0: Zero-LLM deterministic fast paths (media, search, navigation)
-│   ├── playbook.ts       # Tier 1: Hermes site memory, archetype fingerprinting & auto-learning
-│   ├── llm.ts            # OpenAI client adapter, Stagehand custom model provider & schema prompts
-│   ├── planner.ts        # Autonomous multi-step planning loop, adaptive replanning, conclusive evaluator
-│   ├── scan.ts           # CSV batch URL extractor with real-time stream processing
-│   ├── cli.ts            # OpenCode-style interactive REPL, @ autocomplete, bracketed paste
-│   └── server.ts         # Fast HTTP & SSE Web UI server with live screen preview
-├── data/
-│   └── playbooks.json    # Persisted domain playbooks, verified endpoints, and selectors
-├── index.ts              # Clean, unified CLI & Web UI entry point
-├── config.json           # Default configuration (LLM, browser, heuristics, shortcuts)
-└── package.json
-```
-
-```mermaid
-flowchart TD
-    subgraph UI_Layer [User Interfaces]
-        CLI[Interactive CLI / REPL - cli.ts]
-        WebUI[Web UI Dashboard - server.ts]
-        OneShot[One-Shot CLI Execution]
-    end
-
-    subgraph Tiered_Pipeline [Three-Tier Execution Pipeline]
-        T0[Tier 0: Deterministic Fast-Paths - heuristics.ts\n0 tokens, <100ms]
-        T1[Tier 1: Hermes Site Memory & Archetypes - playbook.ts\nEndpoints, Selectors, Shortcuts]
-        T2[Tier 2: Distilled DOM + Fast LLM Planner - planner.ts\n~500 token snapshots, fast extract]
-    end
-
-    subgraph LLM_Adapter [Local LLM Adapter Layer]
-        LLMAdapter[OpenAI API Client - llm.ts]
-        ZodHealer[Strict Zod Schema Healer - utils.ts]
-        LlamaServer[(llama-server / Ollama / vLLM)]
-    end
-
-    subgraph Browser_Layer [Browser Automation]
-        StagehandSDK[Stagehand SDK - stagehand.ts]
-        Playwright[Playwright Chromium - browser.ts]
-        Distill[DOM Distiller & API Interceptor - distill.ts]
-        DOMScanner[Zero-LLM Cookie Dismissal - browser.ts]
-    end
-
-    UI_Layer --> T0
-    T0 -- Handled (Media, Nav, Search) --> Playwright
-    T0 -- Unhandled --> T1
-    T1 -- Shortcut / Playbook Hit --> Playwright
-    T1 -- Planner Step --> T2
-    T2 --> Distill
-    Distill --> Playwright
-    T2 --> StagehandSDK
-    StagehandSDK --> LLMAdapter
-    LLMAdapter --> ZodHealer
-    ZodHealer --> LlamaServer
-    Playwright --> DOMScanner
+📊 [Execution Stats] Tier 0 (Heuristic): 2 | Tier 1 (Playbook): 0 | Tier 2 (LLM): 0 | LLM Calls Skipped: 2
+⏱️ Total Time: 3.42s
 ```
 
 ---
 
-## 🧩 Advanced Features & Resilience
-
-### 1. Strict Zod Schema Self-Healing
-Stagehand enforces strict Zod schemas (`z.strictObject(...)`) across all internal operations (`act`, `extract`, `observe`). Quantized local models frequently return extra fields (like `action`, `twoStep`) or schema reflection echoes (`{"$schema": "...", "properties": {...}}`). 
-
-Stagehand Local's adapter in `src/utils.ts` automatically:
-- Strips unallowed keys and filters properties strictly against the target schema.
-- Normalizes types (e.g. converting nested objects or arrays to expected string formats).
-- Generates compliant defaults if a model echoes raw schema metadata, completely eliminating `unrecognized_keys` and `invalid_type` crashes.
-
-### 2. Dynamic Adaptive Planning & Conclusive Recovery
-When searching or browsing complex sites, models sometimes extract incomplete intermediate artifacts (like search engine result snippets or numeric references) and conclude prematurely.
-
-Stagehand Local's `synthesize()` evaluator inspects the extraction:
-- If the result is inconclusive or notes missing data (e.g. *"cannot determine from search snippet"*), it marks `isComplete: false`.
-- The planner dynamically adapts its plan, clicks the organic search result, and navigates into the destination website (e.g. `roboflow.com/careers`) to find the actual answer before concluding.
-
-### 3. Zero-LLM Cost Cookie & Overlay Dismissal
-Standard web agents waste 1–2 expensive LLM calls per page on cookie banners. Stagehand Local executes an in-page DOM script (`page.evaluate`) immediately upon navigation that matches button text against configurable patterns (`Accept all`, `I agree`, `Got it`, `Allow all`). Overlays disappear in <50ms at zero token cost.
-
-### 4. CDP Resiliency & DOM Settling
-Modern SPAs constantly hydrate and detach frames during load. Stagehand Local includes configurable DOM settling buffers (`domSettleMs: 1500`), lifecycle synchronizations (`domcontentloaded`), and exponential backoff retry wrappers on all Playwright CDP operations.
-
-### 5. Fact-Pinning Context Manager
-- **Pinned Facts**: Attached files (`@file`, `/attach`) and the most recent page extraction are locked with `pinned: true` and are never evicted.
-- **Selective Pruning**: Transient chit-chat and stale history are pruned when exceeding the context budget (`contextWindowChars: 24000`, ~6,000 tokens), with explicit budget warnings.
-- **Deduplication**: Automatically detects overlapping text pastes (>60% similarity) and replaces previous entries in-place.
-
-### 6. DOM Distillation & Fast Extraction (70%–90% Token Reduction)
-When running on local hardware (e.g., Apple Silicon unified memory), evaluating large prompts is a major performance bottleneck: processing 10,000–30,000 tokens from raw HTML or Stagehand's full CDP Accessibility tree takes 15–30 seconds, balloons the KV cache, and causes swap thrashing or timeouts. Stagehand Local introduces a multi-tier distillation and extraction engine in `src/distill.ts` and `src/planner.ts`:
-
-- **Deep In-Browser DOM Distillation (`distillPage`)**:
-  - Runs inside the browser via `page.evaluate()` in ~10–25ms across any modern or legacy website.
-  - **Structural Container-First Extraction**: Targets logical record containers first (`tr`, `li`, `article`, `[role="row"]`, `[role="article"]`, `[class*="card"]`, `[class*="item"]`, `p`, `blockquote`). Keeps composite records (e.g., story title + author + points + comments, or job title + department + location) intact as atomic units instead of scattering them into isolated leaf fragments.
-  - **Table Column Alignment**: Formats table rows (`<tr>`) with clean `col1 | col2 | col3` cell separators, keeping column structures aligned for local LLM evaluation.
-  - **Child Deduplication & Noise Filtering**: Skips headers, navigation bars (`<nav>`), footers (`<footer>`), and child elements whose parent container was already captured.
-  - **Universal Visible Text Fallback**: If structured container extraction yields less than 150 characters (e.g. custom Web Components, canvas wrappers, unusual frameworks), it automatically falls back to clean visible text from `main`, `#content`, `[role="main"]`, or `document.body`. Completely eliminates `~0 tokens` distillation failures.
-  - Generates up to **12,000 characters** (~3,000 tokens) across up to 150 content blocks in a single distilled snapshot.
-
-- **MiniSearch Pre-Extraction Filter (`rankDistilledBlocks`)**:
-  - Automatically indexes distilled text blocks using in-memory full-text search (`minisearch` with `prefix: true` and `fuzzy: 0.2`).
-  - **Document Order Preservation**: For broad extractions (`all`, `list`, `stories`, `jobs`, `roles`, `top`, `table`), preserves blocks in their **exact DOM document order**. For specific keyword searches, re-sorts matched blocks by original document index (`id`), ensuring rankings, row alignment, and narrative context are never shuffled.
-  - Slices relevant blocks into `fastExtract()`, reducing prompt size from thousands of characters down to **~180–400 tokens** for lightning-fast, hallucination-free evaluation on Gemma 4.
-
-- **Structural Extraction Self-Verification (`isExtractionValid`)**:
-  - Inspects extracted JSON arrays to verify data integrity. Rejects empty, trivial, ID-only, or degraded extractions where primary fields (e.g. `title`, `name`, `role`) are mostly `"N/A"`, `"Unknown"`, `"null"`, or empty, automatically triggering retries or escalation rather than accepting hallucinated data.
-
-- **Dedicated Google SERP Distiller (`distillGoogleSearch`)**:
-  - Extracts Google Search results without injecting ads, related searches, tracking parameters, or footer bloat.
-  - **Opportunistic Zero-Hop Completion**: Inspects visible Google AI Overviews and Featured Snippets (`div[data-attrid="wa:/description"]`, `div.LGOjhe`). If the snippet conclusively answers factual questions (e.g. definitions, dates, facts), the agent completes immediately in step 1 (0 extra navigations, ~120 tokens).
-  - **Clean Organic Results**: Extracts top 7 organic results (Title + destination URL). Drops SERP planner prompt size from ~800 tokens to **~120 tokens**, allowing the planner to navigate directly (`{"action":"navigate","url":"https://roboflow.com/careers"}`) or click by title instead of executing fragile, deep XPath selectors.
-
-- **Resilient Multi-Tier Fallback Extraction (`extractText`)**:
-  - Eliminates local LLM timeouts that occur when falling back to Stagehand's 30,000-token full AXTree dump:
-    1. **Tier 1 (Distilled Fast Extract)**: Ingests top ranked distilled content and intercepted API responses. Succeeds in ~1–2s on 90%+ of pages.
-    2. **Tier 2 (Scoped Locator Extract)**: If distillation was partial, dynamically locates the primary content container (`main`, `#content`, `#main-content`, `.jobs`, `.careers`, `[role="main"]`, `article`, `section`) and scopes Stagehand's extract using `page.locator(mainSelector)` and `{ selector }`.
-    3. **Tier 3 (Direct In-Browser Text Extract)**: Pulls up to 15,000 characters of visible DOM `innerText` from main content containers and feeds it directly to the local model, completely bypassing AXTree serialization.
-    4. **Unscoped Fallback Guard**: Strictly rejects bare unscoped full-page AXTree dumps to guarantee local inference stability.
-
-- **Network & SPA State Interception (`setupApiInterceptor`)**: Injects an in-browser hook via `page.addInitScript()` to capture XHR and `fetch` requests matching internal JSON endpoints (`/api/`, `/v1/`, `/graphql`, `.json`), as well as SPA globals (`window.__NEXT_DATA__`, `window.ytInitialData`). Modern SPAs return clean JSON (200–500 tokens) that completely bypasses DOM evaluation.
-- **Fast Extract Path (`fastExtract`)**: Runs extraction prompts against distilled markdown or captured JSON instead of invoking Stagehand's full accessibility tree serializer. Executes in ~1–2s with 10x faster prefill.
-- **Planner Page Snapshots (`buildPlannerSnapshot`)**: Injects a compact snapshot of visible interactive controls, organic search results, and page headings directly into each planner step prompt (~500 tokens), giving the planner exact visibility into page state without guessing.
-
-### 7. Three-Tier Execution Pipeline & Telemetry
-To completely eliminate unnecessary prompt evaluations and prevent memory pressure on local hardware, Stagehand Local uses a tiered decision engine with automated telemetry:
-
-- **Tier 0: Deterministic Fast-Paths & State Machine (`src/heuristics.ts`, `src/compiler.ts`) — 0 Tokens, <100ms**
-  - **$t=0$ Structured Goal Compiler (`src/compiler.ts`)**: Compiles raw natural language goals once at step 0 into a typed `ExecutionPlan` contract with Zod schema validation. Automatically extracts primary search queries while preserving identifying entities (e.g. song titles, artist names, company names) and compound instructions (e.g. `timeOffsetSeconds: 60`, `isAbsoluteSeek: true`). Eliminates multi-step planning hallucinations.
-  - **BM25 / Fuzzy Scored Candidate Selection (`clickBestMatchingCard`)**: Eliminates blind `.first()` clicks on YouTube and SERP pages. Scrapes candidate cards in-browser (<15ms) and builds an in-memory `MiniSearch` index across titles and channel names, clicking the candidate with the highest keyword relevance (e.g. matching official music videos over unrelated playlist intros or ads).
-  - **Strict State-Gated Action Dispatcher**: Media seeking and skipping are strictly state-gated to verified watch pages (`youtube.com/watch` or `/video/`). Pre-action state gates reject any seek attempt on search results pages (`youtube.com/results`, `google.com/search`) and redirect execution to candidate card matching until the page transition completes.
-  - **CDP Lifecycle Synchronization**: Replaced un-awaited raw `page.goto` calls with `navigate(page, url)` and `waitForURL(/.*watch\?v=.*/)`, ensuring `domcontentloaded` and network idle states settle before CDP evaluations execute. Eliminates `-32001 Session with given id not found` disconnect errors.
-  - **Delta-State Verified YouTube Ad Skipping & 3-Attempt Escalation**:
-    - **16x Playback Acceleration**: Automatically sets ad video `playbackRate = 16` and `muted = true`, clearing 5s countdowns in **~312ms** and 15s unskippable ads in **~900ms**.
-    - **Dual-Mode Native CDP Click**: Dispatches full synthetic pointer/mouse events and executes native Playwright hardware-level mouse clicks (`page.mouse.click(x, y)` with `isTrusted: true`) using bounding boxes, bypassing player synthetic event shields.
-    - **Accurate Ad State vs. Lingering Container Disambiguation**: Cross-references player API (`player.getVideoData().isAd`, `player.getAdState()`) and visible overlay dimensions to eliminate false-positive loops on persistent empty ad containers.
-    - **Content Protection**: Strictly guards against seeking content videos and locks `playbackRate = 1.0` and `muted = false` upon ad completion.
-    - **Attempt 1 Diagnostic Dump**: Logs ad candidate metadata (`🔍 AD DEBUG`) and captures `debug-ad-*.png` screenshots immediately on attempt 1.
-    - **3-Attempt Escalation**: If ad skipping does not succeed within 3 attempts, automatically yields control to the Tier 2 LLM planner.
-  - **Universal Interstitial Recovery Protocol (`src/interstitial.ts`)**:
-    - **Viewport Occlusion & Pointer-Event Diagnostics**: Probes viewport center with `document.elementFromPoint()` to detect fixed/absolute high-z overlays, modals, and pre-roll ads blocking interactions.
-    - **Time-Aware Countdown Waiting**: Detects active countdowns ("Skip in 5s", "Wait 3s") and waits until either the timer expires or a skip/dismiss action becomes enabled.
-    - **4-Tier Escalation Ladder**:
-      1. *Tier 1 (Semantic Escape)*: Dispatches keyboard `Escape` event to dismiss standard native dialogs.
-      2. *Tier 2 (Action Word Scan)*: Detects and clicks action buttons (`"Skip"`, `"Close"`, `"Dismiss"`, `"No thanks"`, `"Got it"`).
-      3. *Tier 3 (Geometric Coordinate Hunting)*: Clicks the top-right / top-left corner zone of the blocking overlay to dismiss custom/SVG modals without text or labels.
-      4. *Tier 4 (Surgical Guillotine)*: Removes high-z overlay DOM nodes and resets `document.body.style.overflow = "auto"` to unlock scrolling without breaking page layout.
-  - **Google SERP Fast-Hop**: On Google Search pages, checks for visible direct answers or automatically resolves the first clean organic result (`page.locator('#search a[href^="http"]:not([href*="google.com"])').first()`) and fast-hops directly into the destination URL (`continueLoop: true`), completely bypassing the LLM planner.
-  - **Loop-Immune Semantic Navigation (`trySemanticNavigation`)**:
-    - **URL Stripping**: Strips hostnames/URLs from instructions before matching keywords so domain names (e.g. `news.ycombinator.com`) never falsely trigger navigation heuristics.
-    - **Inquiry Exclusion**: Bypasses semantic navigation when the goal is an extraction or question (`what`, `which`, `extract`, `how many`, `think which`, etc.).
-    - **`isAlreadyOnTargetPage` Guard**: Skips navigation if current URL already satisfies the target (`/careers`, `/jobs`, `/pricing`, `/docs`, etc.).
-    - **In-Page Anchor & Hash Filter**: Ignores links pointing to the same page or `#hash` anchors (e.g. `#jobs`).
-    - **Delta-State Verification**: Verifies `urlAfter !== urlBefore` after clicking before claiming success.
-    - **Per-Domain Target Dedup**: Ensures a semantic target is visited at most once per domain in a session.
-- **Tier 1: Hermes Site Memory & Archetype Detection (`src/playbook.ts`)**
-  - **Direct ATS API Fast-Path (<200ms, 0 DOM tokens)**: When visiting or linking to modern ATS providers (**Ashby**, **Greenhouse**, **Lever**), the agent intercepts or scans for ATS endpoints and fetches the complete job board via public REST APIs (`api.ashbyhq.com/posting-api/job-board/{org}`, `boards-api.greenhouse.io/v1/boards/{org}/jobs`, `api.lever.co/v0/postings/{org}`). Completely bypasses DOM rendering and prompt generation.
-  - **Deep ATS Script & Global Detection (`findAtsUrlOnPage`)**: Detects script-based ATS embeds (e.g. `<script src="https://jobs.ashbyhq.com/<org>/embed">`), window globals (`window.ashby.settings.ashbyBaseJobBoardUrl`), and inline script API URLs on corporate careers pages (e.g. Roboflow).
-  - **Persistent Site Playbooks (`data/playbooks.json`)**: Tracks visited domains, historical success rates, verified selectors, and direct URL shortcuts.
-  - **SPA API Endpoint Memory**: When Stagehand intercepts internal JSON endpoints (e.g. Job board endpoints, catalog APIs), it indexes them to the site's playbook for instant retrieval on future visits.
-  - **Master Archetype Fingerprinting**: Includes built-in archetype templates (e.g., ATS/Careers: Lever, Greenhouse, Ashby; E-Commerce: Shopify; Media: YouTube). In-browser fingerprinting evaluates DOM signals, script paths, and globals (`window.__NEXT_DATA__`, `window.Shopify`, `window.ytInitialData`). When a site matches ≥2 signals, it automatically inherits known selectors and endpoints.
-  - **Autonomous Auto-Learning**: Automatically updates domain records upon every successful extraction or task completion.
-- **Tier 2: Distilled DOM + Fast Local LLM Planning (`src/planner.ts`)**
-  - When heuristics and playbook shortcuts do not apply, the agent falls back to local LLM planning using lightweight distilled page snapshots (~500 tokens) rather than raw HTML or full CDP accessibility trees.
-  - **Anti-Repeat "Action Dedup" Circuit Breaker**: Detects repeated empty extraction attempts on the same page. Rather than repeating identical intents across multiple steps, the circuit breaker immediately forces an ATS direct API fetch, navigates to discovered subpage links, or triggers a dynamic reveal scroll.
-- **🛡️ Network-Level Consent SDK Route Blocking (`src/browser.ts`)**
-  - Intercepts and aborts common third-party cookie and consent banner scripts (`onetrust`, `cookiebot`, `usercentrics`, `klaro`, `termly`) at the Playwright network route level before they mount into the DOM.
-- **📊 Tier Hit Telemetry & Execution Stats**
-  - Tracks session counters for every executed step across Tier 0, Tier 1, and Tier 2, logging a one-line summary upon goal completion:
-    ```text
-    📊 [Execution Stats] Tier 0 (Heuristic): 2 | Tier 1 (Playbook): 1 | Tier 2 (LLM): 1 | LLM Calls Skipped: 3
-    ```
-
----
-
-
-## 📋 Prerequisites
-
-1. **Node.js**: `v18+` (v20+ or v22 recommended).
-2. **Local LLM Server**: Any OpenAI-compatible API running locally.
-
-### Recommended Local LLM Server Configurations
-
-#### A. Gemma 4 26B (via `llama-server`)
-```bash
-llama-server \
-  -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ4_XS \
-  -hfd unsloth/gemma-4-26B-A4B-it-GGUF:MTP-Q8_0.gguf \
-  --no-mmproj --spec-draft-n-max 2 --spec-draft-p-min 0.6 \
-  --host 0.0.0.0 --port 8080 --jinja -c 65536 -np 1 \
-  --n-gpu-layers 99 --flash-attn on --cache-type-k q4_0 --cache-type-v q4_0 \
-  --temp 1.0 --top-p 0.95 --top-k 64 --repeat-penalty 1.0 \
-  --reasoning-format deepseek --reasoning-budget 4096
-```
-
-#### B. Qwen 2.5 / 3.8 27B (via `llama-server`)
-```bash
-llama-server \
-  -m path/to/Qwen2.5-32B-Instruct-Q4_K_M.gguf \
-  --port 8080 \
-  --ctx-size 16384 \
-  --n-gpu-layers 99 \
-  --flash-attn on
-```
-
-*Also fully compatible with Ollama (`ollama serve`), LM Studio (`http://127.0.0.1:1234/v1`), or vLLM.*
-
----
-
-## 🚀 Quick Start
+## ⚡ Quick Start
 
 ### 1. Install Dependencies & Chromium
 ```bash
@@ -267,82 +30,181 @@ npm install
 npx playwright install chromium
 ```
 
-### 2. Verify Configuration (`config.json`)
-Ensure your LLM endpoint, model ID, and timeouts match your running server:
+### 2. Verify Your Local LLM Endpoint (`config.json`)
+Point `config.json` at your local inference server (e.g. `llama-server`, Ollama, vLLM, LM Studio):
 ```json
 {
   "llm": {
     "baseURL": "http://127.0.0.1:8080/v1",
     "modelId": "unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ4_XS",
     "stepTimeoutMs": 120000
-  },
-  "shortcuts": {
-    "google": "https://www.google.com/search?q={{query}}&hl=en"
   }
 }
 ```
 
 ### 3. Launch
 
-**Web UI Dashboard Mode**:
 ```bash
+# Web UI Dashboard (real-time execution steps, live screen viewer, settings)
 npm run ui
-# or: npx tsx index.ts --ui --port 7788
-```
+# → Open http://127.0.0.1:7788
 
-**Interactive CLI REPL Mode**:
-```bash
+# OpenCode-style Interactive Terminal REPL (tab completion, @file attachments)
 npm run cli
-# or: npx tsx index.ts -i
-```
 
-**One-Shot CLI Prompt**:
-```bash
-npx tsx index.ts "https://news.ycombinator.com what is the top story right now?"
-```
-
-**Headless One-Shot Mode**:
-```bash
-npx tsx index.ts --headless "https://github.com/trending what are the top 3 repos?"
+# One-shot command from terminal
+npx tsx index.ts "https://news.ycombinator.com what is the #1 story right now?"
 ```
 
 ---
 
-## 💻 CLI Options & Flags
+## 🎯 When to Use vs. When NOT to Use
 
-| Flag / Option | Description |
+| ✅ Ideal Use-Cases | ❌ Not Built For |
 |---|---|
-| `--ui` | Launch the Web UI dashboard on localhost |
-| `--port <number>` | Port for the Web UI server (default: `7788`) |
-| `-i`, `--interactive` | Start interactive CLI REPL mode |
-| `--headless` | Run browser in headless mode (overrides config) |
-| `--headed`, `--no-headless` | Run browser in headed mode with visible Chromium window |
-| `-c <path>`, `--config <path>` | Specify custom JSON configuration file path |
-| `-h`, `--help` | Show CLI usage and command options |
-| `"<instruction>"` | Run one-shot prompt in single execution mode and exit |
+| **Privacy-First Workflows**: Local documents (resumes, specs, candidate lists) never leave your machine. | **Heavy CAPTCHA Farms**: Sites protected by Cloudflare Turnstile, DataDome, or Arkose that require CAPTCHA-solving farms. |
+| **Batch CSV Extraction**: High-volume web scraping across 100+ sites with zero cloud API token costs. | **Multi-Factor Auth (MFA)**: Complex enterprise logins requiring manual mobile authenticator prompts. |
+| **Documentation & Technical Search**: Extracting commands, pricing tables, and docs with zero-token in-DOM probes. | **Infinite Cloud Budgets**: Teams with unrestricted cloud budgets willing to pay $0.05+ per browser action step. |
+| **Job & ATS Pipelines**: Intercepting Lever, Greenhouse, and Ashby to pull 100+ listings in <200ms via direct REST APIs. | **Pixel-Perfect Canvas / WebGL Games**: Applications with zero standard DOM or semantic text elements. |
+
+---
+
+## 🏗️ Three-Tier Execution Pipeline
+
+Most browser agents pass the entire DOM or a massive 20,000-token Accessibility Tree (AXTree) to an LLM on every interaction step. On local hardware, prefilling thousands of tokens takes 15–30 seconds per step, burns KV-cache memory, and triggers timeouts.
+
+Stagehand Local solves this with a **three-tier execution pipeline** where the LLM is the last resort, not the first:
+
+```mermaid
+flowchart TD
+    Goal[User Goal / Prompt] --> Compiler[Goal Contract Compiler\nt=0 typed plan]
+    Compiler --> T0
+
+    subgraph Tier0 [Tier 0: Zero-LLM Deterministic Fast-Paths]
+        T0[DOM Probes & State Machine\n<15ms, 0 tokens]
+        T0 -->|Google SERP| SERPHop[Direct SERP Fast-Hop\nJump directly to 1st organic result]
+        T0 -->|Code / CLI / Flags| DOMProbe[In-Page DOM Probe\nExtract <pre>, <code> directly]
+        T0 -->|YouTube / Media| MediaHeuristic[16x Ad-Skip & Playback\nDirect seek & candidate rank]
+        T0 -->|Subpages| SemanticNav[Semantic Link Jump\npricing, careers, docs]
+    end
+
+    T0 -- Handled --> Done([Step / Goal Complete])
+    T0 -- Unhandled --> T1
+
+    subgraph Tier1 [Tier 1: Hermes Site Memory & Archetype Fast-Paths]
+        T1[Domain Playbooks & API Interceptors\n<200ms, 0 DOM tokens]
+        T1 -->|Ashby / Greenhouse / Lever| ATSFastPath[Direct REST API Fetch\n70+ jobs in <200ms]
+        T1 -->|Known Site Playbook| PlaybookHit[Playbook Endpoints & Selectors]
+    end
+
+    T1 -- Handled --> Done
+    T1 -- Unhandled --> T2
+
+    subgraph Tier2 [Tier 2: Distilled DOM + Fast Local LLM Planner]
+        T2[In-Browser DOM Distiller\nStructural records, 70-90% token reduction]
+        T2 --> MiniSearch[MiniSearch Block Slicer\nTop 8 ranked blocks, <250 tokens]
+        MiniSearch --> LLM[Local LLM Planner\nGemma 4 / Qwen 2.5]
+        LLM --> ZodHealer[Zod Schema Self-Healer\nFilters unrecognized keys & reflection]
+        ZodHealer --> BrowserAct[Playwright Atomic Action]
+    end
+
+    BrowserAct --> Done
+```
+
+### Tier Breakdown
+
+1. **Tier 0: Zero-LLM Fast-Paths (`<15ms`, `0 tokens`)**
+   - **Google SERP Fast-Hop**: Bypasses the search engine page entirely by hopping directly to the first clean organic result URL.
+   - **In-Page DOM Code Probe**: Queries asking for CLI commands, coverage flags, or install snippets (`vitest run --coverage`, `npm install`) probe `<pre>`, `<code>`, and `.language-bash` directly in the DOM.
+   - **16x Playback Ad Acceleration**: Accelerates video ads to 16x speed and dismisses overlays in ~312ms.
+   - **Semantic Target Navigation**: Jumps straight to `/pricing`, `/careers`, or `/docs` with target verification and automatic rollback guards.
+
+2. **Tier 1: Hermes Site Memory & Archetypes (`<200ms`, `0 DOM tokens`)**
+   - **Master ATS API Fast-Path**: Intercepts modern ATS platforms (**Ashby**, **Greenhouse**, **Lever**) and fetches all open roles via direct public REST APIs, skipping DOM rendering entirely.
+   - **Persistent Playbooks (`data/playbooks.json`)**: Remembers domain endpoints, verified selectors, and URL shortcuts across sessions.
+   - **Archetype Fingerprinting**: Recognizes site types (Shopify, ATS, Docusaurus) from globals (`window.__NEXT_DATA__`) and auto-inherits extraction strategies.
+
+3. **Tier 2: Distilled DOM + Fast Local LLM Planning (`1–2s`)**
+   - **In-Browser DOM Distillation (`distillPage`)**: Extracts structured record containers (`tr`, `article`, `[class*="card"]`) and strips noise (`nav`, `footer`).
+   - **MiniSearch Block Slicing (`rankDistilledBlocks`)**: Indexes page blocks in-memory and passes only the top **8** ranked blocks (**<250 tokens** vs. 20,000+ raw AXTree tokens) to Gemma 4 / Qwen.
+   - **Zod Self-Healing**: Strips model reflection artifacts and unallowed keys, guaranteeing zero `unrecognized_keys` crashes.
+
+---
+
+## 🧩 Core Capabilities & Resilience
+
+| Feature | Description | Impact |
+|---|---|---|
+| **Parse-Time Attachment Validation** | Validates `@file` and natural language references before planner step 1 | Stops runs immediately on missing attachments; prevents 10-step thrashing loops |
+| **Direct ATS Fast-Paths** | Intercepts Lever, Ashby, and Greenhouse by org slug | Fetches 70+ jobs via direct REST API in <200ms at 0 DOM tokens |
+| **Strict Zod Self-Healing** | Sanitizes schema echoes, unallowed keys, and type mismatches | Eliminates schema crashes on quantized local models |
+| **Zero-LLM Cookie Dismissal** | In-page DOM evaluator dismisses consent banners in <50ms | Saves 1–2 LLM calls per page; route-blocks OneTrust, Cookiebot, Klaro |
+| **DOM Distillation & Slicing** | Extracts container-first records; MiniSearch slices top 8 blocks | Slashes prompt payloads 70–90% (<250 tokens), 10x faster prefill |
+| **Destination-Verified Semantic Nav** | Verifies URL/title alignment after navigation; auto-rolls back if mismatched | Eliminates navigation misfires (e.g. docs vs. contact page) |
+| **Fact-Pinning Context Manager** | Locks attached files and extractions; prunes transient chit-chat | Retains critical reference context across long sessions |
+| **Universal Interstitial Recovery** | 4-tier ladder (Escape → Action Click → Coordinate Click → DOM Guillotine) | Clears blocking modals, popups, and countdown overlays |
+| **Delta-State 16x Ad Acceleration** | Speeds up video ads to 16x playbackRate + native hardware-level clicks | Clears 5s countdowns in ~312ms and 15s unskippable ads in ~900ms |
+| **Anti-Repeat Circuit Breakers** | Detects repeated empty actions on the same page | Breaks dead-end loops by forcing subpage navigation or scroll reveals |
+
+<details>
+<summary><b>🔬 Deep Architectural & Technical Mechanics (Click to expand)</b></summary>
+
+### 1. In-Browser Structural Container Extraction (`distillPage`)
+Runs inside the browser via `page.evaluate()` in ~10–25ms:
+- **Container-First Extraction**: Targets logical records (`tr`, `li`, `article`, `[role="row"]`, `[class*="card"]`) so composite data (title + author + comments + score) remains atomic.
+- **Table Cell Alignment**: Formats table rows with `col1 | col2 | col3` cell separators for local LLM tabular reasoning.
+- **Child Deduplication**: Skips headers, `<nav>`, `<footer>`, and nested children whose parent record was already captured.
+- **Universal Visible Text Fallback**: If container extraction yields <150 characters, automatically falls back to clean visible text from `main`, `#content`, or `document.body`.
+
+### 2. MiniSearch Pre-Extraction Slicing (`rankDistilledBlocks`)
+- Indexes distilled text blocks in an in-memory full-text search index (`prefix: true`, `fuzzy: 0.2`).
+- Preserves natural DOM document order (`id`) so rankings, table rows, and narrative context are never scrambled.
+- Slices the top 8 ranked blocks into `fastExtract()`, reducing input context to ~180–250 tokens for sub-2-second generation on 26B quantized models.
+
+### 3. Parse-Time Attachment Precondition Guard
+- Scans user prompts for `@filename` or explicit natural-language file references (`based on the attached spec.txt`).
+- Distinguishes email addresses (`support@stripe.com`) from file references.
+- Auto-attaches local files found on disk; triggers an immediate hard stop with a clean error message if referenced attachments are missing, preventing impossible tasks from burning execution steps.
+
+### 4. Semantic Destination Verification (`verifySemanticDestination`)
+- After clicking a semantic link (pricing, docs, careers), verifies that destination URL and `<title>` match the intended target.
+- Rejects error pages, 404s, and dead-ends (<100 characters of text).
+- Reverts invalid jumps via `page.goBack()`, records the domain target in `navigatedSemanticTargets`, and returns `null` so LLM planning takes over from the original page.
+
+### 5. Universal Interstitial Recovery Protocol
+- Probes viewport center with `document.elementFromPoint()` to detect fixed/absolute high-z overlays and blocking modals.
+- Detects countdown timers ("Skip in 5s") and waits until skip buttons become interactive.
+- Escalates through a 4-tier recovery ladder: keyboard `Escape` → action button click → geometric corner-coordinate click → surgical DOM removal (`overflow = "auto"`).
+
+</details>
+
+---
+
+## 🖥️ Web UI Dashboard
+
+Run `npm run ui` (or `npx tsx index.ts --ui --port 7788`) to launch the built-in Web UI dashboard:
+
+- 🤖 **Agent Goal Runner**: Submit natural language instructions and stream step-by-step execution logs (`navigate`, `click`, `extract`, `done`) via Server-Sent Events (SSE).
+- 📸 **Live Screen Viewer**: Automatic and manual snapshot refresh showing the exact live state of the automated Chromium browser.
+- 🔍 **Quick Extract**: Single-click URL data extraction with immediate markdown synthesis.
+- 📋 **Batch CSV Scanner**: Upload and run CSV URL lists with real-time table progress and downloadable CSV output.
+- ⚙️ **Hot-Reload Settings**: Modify LLM endpoint, model ID, timeouts, and settling delays directly from the UI without restarting.
 
 ---
 
 ## 🕹️ Interactive CLI (OpenCode-Style REPL)
 
-The interactive CLI includes rich developer ergonomics:
+Run `npm run cli` for a high-ergonomics developer terminal:
 
 ### 📎 Attaching Files & Tab Autocompletion (`@`)
 Type `@` and press `Tab` to search and attach local workspace files:
 ```text
-[about:blank] > think compare @res[Tab]
-[about:blank] > think compare @Resume_2026.pdf
-📎 Attached "Resume_2026.pdf" (1,420 words / 8.5 KB) to session context.
+[about:blank] > think evaluate @spec.txt against @package.json
+📎 Attached "spec.txt" (450 words / 2.8 KB) to session context.
+📎 Attached "package.json" (69 words / 0.7 KB) to session context.
 ```
 - **Supported Formats**: `.pdf` (via bundled `pdf-parse`), `.docx`/`.rtf` (macOS textutil), `.txt`, `.md`, `.json`, `.csv`, `.ts`, `.js`, `.py`.
-- **Workspace Indexing**: Automatically indexes files while ignoring `node_modules`, `.git`, `.next`, etc.
-
-### ⌨️ Keybinds & Composer Controls
-- **`Enter`**: Submit prompt for execution.
-- **`Shift+Enter` / `Alt+Enter`**: Insert newline for multiline drafting without submitting.
-- **`Tab`**: Autocomplete `@files`, `/commands`, or search shortcuts (`youtube`, `google`, `github`).
-- **Bracketed Paste**: Paste 100+ lines (resumes, JSON, markdown) as a single clean input block.
-- **`/edit`**: Open your system `$EDITOR` (`nano`, `vim`, `code`) to draft complex instructions.
+- **Workspace Indexing**: Indexes files while automatically ignoring `node_modules`, `.git`, `.next`, etc.
 
 ### 📖 CLI Command Reference
 
@@ -351,22 +213,20 @@ Type `@` and press `Tab` to search and attach local workspace files:
 | **`@file`** | `@resume.pdf` / `think @file` | Attach file inline to session context |
 | **`/attach`** | `/attach <path>` | Attach file directly to session memory |
 | **`/files`** | `/files` | List all currently attached files and word counts |
-| **`/edit`** | `/edit` / `/e` | Draft/edit multi-line prompt in external `$EDITOR` |
+| **`/edit`** | `/edit` / `/e` | Draft/edit multi-line prompt in external `$EDITOR` (`nano`, `vim`, `code`) |
 | **`/paste`** | `/paste` / `"""` | Dedicated multi-line capture block (submit with `"""` or `EOF`) |
 | **`goto`** | `goto <url>` | Navigate the current page to the specified URL |
 | **`act`** | `act <instruction>` | Perform a browser action (`act click on the Apply button`) |
 | **`extract`** | `extract <instruction>` | Extract specific data or text from the current page |
 | **`observe`** | `observe [instruction]` | Discover interactive DOM elements and their selectors |
 | **`screenshot`** | `screenshot [file.png]` | Capture a PNG screenshot of the current page |
-| **`think` / `ask`** | `think <question>` | Query the LLM using accumulated session context (no web calls) |
+| **`think` / `ask`** | `think <question>` | Query the LLM using accumulated session context (0 browser calls) |
 | **`context`** | `context` | Inspect all stored extractions, answers, and documents |
 | **`scan`** | `scan <csv> <col> "instr" [out.csv]` | Batch scan URLs from a CSV file |
-| **`save`** | `save [file.txt]` | Save the last extraction or answer to disk |
-| **`pages`** | `pages` | List all open browser tabs and their URLs |
+| **`pages`** | `pages` | List all open browser tabs and URLs |
 | **`back`** | `back` | Navigate back in browser history |
-| **`url`** | `url` | Show current page title and URL |
-| **`history`** | `history` | View action and navigation history in this session |
-| **`exit` / `quit`** | `exit` / `quit` / `q` | Close browser and quit |
+| **`save`** | `save [file.txt]` | Save the last extraction or answer to disk |
+| **`exit`** | `exit` / `quit` / `q` | Close browser and quit |
 
 ---
 
@@ -379,8 +239,8 @@ Stagehand> scan outreach.csv careers_url "Are there open remote engineering role
 ```
 
 - Reads `outreach.csv`.
-- Navigates to each URL in `careers_url`.
-- Dismisses cookie overlays and extracts target data.
+- Navigates each URL in column `careers_url`.
+- Dismisses cookie overlays, attempts Tier 1 ATS direct API fast-paths, and extracts target fields.
 - Appends clean structured output into `results.csv` in real-time.
 
 ---
@@ -446,7 +306,7 @@ When called as a subprocess in automation pipelines, Stagehand Local adheres to 
 |---|---|---|
 | `0` | **Success** | Instruction successfully resolved, extraction returned, or navigation complete. |
 | `1` | **Failure / Timeout** | Browser action failed, empty extraction, step limit reached, or anti-loop circuit breaker triggered. |
-| `2` | **CDP / Network Error** | Playwright Chromium binary missing, CDP protocol error, websocket failure, or network connection refused. |
+| `2` | **CDP / Network Error** | Playwright Chromium binary missing, CDP protocol error, websocket failure, or connection refused. |
 
 ---
 

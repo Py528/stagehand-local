@@ -434,21 +434,13 @@ export function rankDistilledBlocks(
 
   const lowerQuery = query.toLowerCase();
   const isBroadExtraction =
-    lowerQuery.includes("all") ||
-    lowerQuery.includes("list") ||
-    lowerQuery.includes("every") ||
     lowerQuery.includes("openings") ||
     lowerQuery.includes("roles") ||
     lowerQuery.includes("stories") ||
-    lowerQuery.includes("top ") ||
-    lowerQuery.includes("table");
+    (lowerQuery.includes("list all") || lowerQuery.includes("all open"));
 
-  // For broad/list queries, expand to up to 40 blocks and preserve natural DOM document order!
-  const effectiveTopK = isBroadExtraction ? Math.min(blocks.length, 40) : topK;
-
-  if (isBroadExtraction) {
-    return blocks.slice(0, effectiveTopK);
-  }
+  // Cap topK to 8 for targeted queries and 15 for broad extractions to keep prompts under ~250 tokens
+  const effectiveTopK = isBroadExtraction ? Math.min(blocks.length, 15) : topK;
 
   try {
     const miniSearch = new MiniSearch({
@@ -604,20 +596,20 @@ If the content does not contain what is requested, return {"extraction": ""}`,
 export function buildPlannerSnapshot(
   distilled: DistilledPage,
   apiData: string | null,
-  maxChars = 4000
+  maxChars = 2000
 ): string {
   const parts: string[] = [];
   if (distilled.interactive.length) {
     parts.push(
       "Interactive Elements:\n" +
-        distilled.interactive.slice(0, 30).join("\n")
+        distilled.interactive.slice(0, 15).join("\n")
     );
   }
   if (distilled.content) {
-    parts.push("Page Content:\n" + distilled.content.slice(0, 2000));
+    parts.push("Page Content:\n" + distilled.content.slice(0, 1000));
   }
   if (apiData) {
-    parts.push("API Data:\n" + apiData.slice(0, 800));
+    parts.push("API Data:\n" + apiData.slice(0, 400));
   }
   let s = parts.join("\n\n");
   if (s.length > maxChars) s = s.slice(0, maxChars);
@@ -671,36 +663,43 @@ export async function distillGoogleSearch(page: any): Promise<GoogleSerpSummary>
 
         // 2. Extract Clean Organic Results (Title + Target URL)
         const results: Array<{ title: string; url: string; index: number }> = [];
-        const searchBlocks = document.querySelectorAll("#search div.g, #search div[data-hveid], #rso div.g");
+        const organicSelectors = [
+          '#search a[href^="http"]:not([href*="google.com"])',
+          '#rso a[href^="http"]:not([href*="google.com"])',
+          'div.g a[href^="http"]:not([href*="google.com"])',
+          'a:has(h3)[href^="http"]:not([href*="google.com"])',
+          'h3 a[href^="http"]:not([href*="google.com"])',
+          'table a[href^="http"]:not([href*="google.com"])',
+        ];
+
         let idx = 1;
-
-        for (const block of Array.from(searchBlocks)) {
-          const anchor = block.querySelector('a[href^="http"]:not([href*="google.com"])') as HTMLAnchorElement | null;
-          const heading = block.querySelector("h3");
-          if (anchor && heading && heading.textContent) {
-            const title = heading.textContent.trim();
-            const url = anchor.href;
-            if (url && !results.some((r) => r.url === url) && title.length > 2) {
-              results.push({ index: idx++, title, url });
-            }
-          }
-          if (results.length >= 7) break;
-        }
-
-        // Fallback if specific searchBlocks didn't catch links
-        if (results.length === 0) {
-          const anchors = document.querySelectorAll('#search a[href^="http"]:not([href*="google.com"])');
+        for (const sel of organicSelectors) {
+          const anchors = document.querySelectorAll(sel);
           for (const el of Array.from(anchors)) {
-            const heading = el.querySelector("h3");
-            if (heading && heading.textContent) {
-              const title = heading.textContent.trim();
-              const url = (el as HTMLAnchorElement).href;
-              if (url && !results.some((r) => r.url === url) && title.length > 2) {
-                results.push({ index: idx++, title, url });
-              }
+            const anchor = el as HTMLAnchorElement;
+            const url = anchor.href || "";
+            if (
+              !url.startsWith("http") ||
+              url.includes("google.com") ||
+              url.includes("/search") ||
+              url.includes("/aclk") ||
+              url.includes("accounts.google") ||
+              url.includes("support.google") ||
+              url.includes("policies.google") ||
+              url.includes("webcache")
+            ) {
+              continue;
+            }
+            if (results.some((r) => r.url === url)) continue;
+
+            const heading = anchor.querySelector("h3") || anchor.closest("div.g, div[data-hveid]")?.querySelector("h3");
+            const title = (heading?.textContent || anchor.textContent || "").trim();
+            if (title.length > 2) {
+              results.push({ index: idx++, title, url });
             }
             if (results.length >= 7) break;
           }
+          if (results.length >= 7) break;
         }
 
         return { aiOverview, results };

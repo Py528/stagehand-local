@@ -1,3 +1,4 @@
+import path from "node:path";
 import { cfg } from "./config.js";
 import { isNearDuplicate, withTimeout } from "./utils.js";
 import { readFileContent } from "./files.js";
@@ -129,28 +130,134 @@ export async function attachFileToSession(filePath: string): Promise<boolean> {
   return true;
 }
 
-export async function resolvePromptFiles(line: string): Promise<string> {
-  const atMatches = line.match(/@([^\s"']+)/g);
-  if (!atMatches) return line;
+export interface AttachmentValidationResult {
+  ok: boolean;
+  resolvedInput: string;
+  error?: string | undefined;
+  missingFile?: string | undefined;
+}
 
-  let updated = line;
-  for (const match of atMatches) {
-    let rawPath = match.slice(1);
-    if (rawPath.includes("@") || /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(match)) continue;
+export async function validateAndResolveAttachments(
+  input: string
+): Promise<AttachmentValidationResult> {
+  let updated = input;
 
-    // Strip trailing punctuation
-    const trailingPunct = rawPath.match(/[?!,;:)\u007d\]]+$/)?.[0] || "";
-    if (trailingPunct) {
-      rawPath = rawPath.slice(0, -trailingPunct.length);
+  // 1. Check for @file references (e.g. @spec.txt, @"my doc.pdf", etc.)
+  // Must be preceded by start-of-line, whitespace, or bracket/punctuation to avoid matching emails (e.g. support@stripe.com)
+  const atRegex = /(?:^|[\s(\[{,;:])@(?:["']([^"']+)["']|([^\s"']+))/g;
+  let atMatch: RegExpExecArray | null;
+  while ((atMatch = atRegex.exec(input)) !== null) {
+    let rawPath = atMatch[1] || atMatch[2] || "";
+    const fullMatched = atMatch[0];
+    const atToken = fullMatched.slice(fullMatched.indexOf("@"));
+
+    // Skip if it looks like an email or part of an email address
+    if (rawPath.includes("@") || /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(rawPath)) {
+      continue;
     }
 
+    // Strip trailing punctuation from unquoted matches
+    if (!atMatch[1]) {
+      const trailingPunct = rawPath.match(/[?!,;:)\}\]]+$/)?.[0] || "";
+      if (trailingPunct) {
+        rawPath = rawPath.slice(0, -trailingPunct.length);
+      }
+    }
+
+    if (!rawPath.trim()) continue;
+
+    // Check if already attached in session
+    const existing = session.attachedFiles.find(
+      (f) =>
+        f.filename.toLowerCase() === path.basename(rawPath).toLowerCase() ||
+        f.path.toLowerCase() === path.resolve(rawPath).toLowerCase()
+    );
+
+    if (existing) {
+      updated = updated.replace(atToken, `[Attached File: ${existing.filename}]`);
+      continue;
+    }
+
+    // Try reading from disk
     const file = await readFileContent(rawPath);
     if (file) {
       await attachFileToSession(rawPath);
-      updated = updated.replace(`@${rawPath}`, `[Attached File: ${file.filename}]`);
+      updated = updated.replace(atToken, `[Attached File: ${file.filename}]`);
+    } else {
+      return {
+        ok: false,
+        resolvedInput: input,
+        missingFile: rawPath,
+        error: `You referenced "${rawPath}" via @${rawPath}, but no matching attachment exists in session context and it was not found on disk. Please attach it first using '/attach <path>' or place the file in the workspace.`,
+      };
     }
   }
-  return updated;
+
+  // 2. Check for explicit natural language references to named files
+  // e.g. "attached spec.txt", "the attached spec.txt", "based on the attached spec.txt", "spec.txt attached"
+  const namedFileRegexes = [
+    /\b(?:the\s+)?attached\s+(?:file\s+)?([a-zA-Z0-9_\-.]+\.[a-zA-Z0-9]{1,10})\b/gi,
+    /\battachment\s+([a-zA-Z0-9_\-.]+\.[a-zA-Z0-9]{1,10})\b/gi,
+    /\b([a-zA-Z0-9_\-.]+\.[a-zA-Z0-9]{1,10})\s+is\s+attached\b/gi,
+  ];
+
+  for (const regex of namedFileRegexes) {
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(input)) !== null) {
+      const referencedName = m[1];
+      if (!referencedName) continue;
+      // Skip URLs / domains (e.g. news.ycombinator.com, stripe.com)
+      if (
+        /^(?:https?:\/\/|[a-z0-9-]+\.[a-z]{2,})/i.test(referencedName) &&
+        /\b(?:com|org|net|io|dev|ai|html?|php)\b/i.test(referencedName)
+      ) {
+        continue;
+      }
+
+      const existing = session.attachedFiles.find(
+        (f) => f.filename.toLowerCase() === referencedName.toLowerCase()
+      );
+
+      if (!existing) {
+        // Try auto-attaching from disk
+        const file = await readFileContent(referencedName);
+        if (file) {
+          await attachFileToSession(referencedName);
+        } else {
+          return {
+            ok: false,
+            resolvedInput: input,
+            missingFile: referencedName,
+            error: `You referenced "${referencedName}" as an attached file, but no matching attachment exists in session context. Please attach it first using '@${referencedName}' or '/attach <path>'.`,
+          };
+        }
+      }
+    }
+  }
+
+  // 3. Check for general references to an attached file when session has none
+  const generalAttachmentRegex =
+    /\b(?:based\s+on\s+)?(?:the\s+)?attached\s+(?:file|document|spec|resume|cv|requirements|spreadsheet|data)\b|\b(?:the\s+)?attachment\b/i;
+  if (generalAttachmentRegex.test(input) && session.attachedFiles.length === 0) {
+    return {
+      ok: false,
+      resolvedInput: input,
+      error: `You referenced an attached file/document, but no files are currently attached to this session. Please attach the required file using '@filename' or '/attach <path>' before running this task.`,
+    };
+  }
+
+  return {
+    ok: true,
+    resolvedInput: updated,
+  };
+}
+
+export async function resolvePromptFiles(line: string): Promise<string> {
+  const res = await validateAndResolveAttachments(line);
+  if (!res.ok) {
+    throw new Error(res.error);
+  }
+  return res.resolvedInput;
 }
 
 export function isConversational(input: string): boolean {

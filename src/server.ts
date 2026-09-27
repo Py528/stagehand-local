@@ -1,7 +1,15 @@
 import http from "node:http";
 import type { Stagehand } from "@browserbasehq/stagehand";
 import { cfg, saveConfig, CONFIG_PATH } from "./config.js";
-import { session, addToConversation, getConversationContext } from "./conversation.js";
+import {
+  session,
+  addToConversation,
+  getConversationContext,
+  validateAndResolveAttachments,
+  isConversational,
+  handleConversational,
+} from "./conversation.js";
+import { localClient } from "./llm.js";
 import { activePage, captureScreenshotBase64 } from "./browser.js";
 import { runAgent, fastUrlQuestion } from "./planner.js";
 import { runScan } from "./scan.js";
@@ -91,6 +99,17 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
             return;
           }
 
+          // Precondition Validation: Verify any referenced attachments at parse time
+          const attachCheck = await validateAndResolveAttachments(prompt);
+          if (!attachCheck.ok) {
+            const errorMsg = attachCheck.error || "Missing referenced attachment";
+            broadcast("agent_error", { error: errorMsg, ts: ts() });
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: errorMsg }));
+            return;
+          }
+          const resolvedPrompt = attachCheck.resolvedInput;
+
           if (isAgentRunning) {
             res.writeHead(409, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "An agent task is already running" }));
@@ -98,22 +117,38 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
           }
 
           isAgentRunning = true;
-          broadcast("agent_start", { prompt, mode, ts: ts() });
+          broadcast("agent_start", { prompt: resolvedPrompt, mode, ts: ts() });
 
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ status: "started", prompt }));
+          res.end(JSON.stringify({ status: "started", prompt: resolvedPrompt }));
 
           // Execute agent asynchronously and stream steps
           (async () => {
             const activePg = await activePage(sh, page);
             try {
-              addToConversation({ role: "user", content: prompt, label: "user_goal" });
-              const result = await runAgent(prompt, sh, activePg, (stepInfo) => {
+              addToConversation({ role: "user", content: resolvedPrompt, label: "user_goal" });
+
+              if (isConversational(resolvedPrompt)) {
+                await handleConversational(
+                  resolvedPrompt.replace(/^(think|ask)\s+/i, ""),
+                  localClient
+                );
+                const finalScreenshot = await captureScreenshotBase64(activePg);
+                broadcast("agent_done", {
+                  prompt: resolvedPrompt,
+                  result: session.lastAnswer || "Done",
+                  screenshot: finalScreenshot,
+                  ts: ts(),
+                });
+                return;
+              }
+
+              const result = await runAgent(resolvedPrompt, sh, activePg, (stepInfo) => {
                 broadcast("agent_step", { ...stepInfo, ts: ts() });
               });
 
               const finalScreenshot = await captureScreenshotBase64(activePg);
-              broadcast("agent_done", { prompt, result: result || "Done", screenshot: finalScreenshot, ts: ts() });
+              broadcast("agent_done", { prompt: resolvedPrompt, result: result || "Done", screenshot: finalScreenshot, ts: ts() });
             } catch (err: any) {
               broadcast("agent_error", { error: err?.message || String(err), ts: ts() });
             } finally {

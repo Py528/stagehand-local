@@ -12,6 +12,7 @@ import {
   pinLatestExtraction,
   attachFileToSession,
   resolvePromptFiles,
+  validateAndResolveAttachments,
   isConversational,
   handleConversational,
 } from "./conversation.js";
@@ -183,9 +184,14 @@ export async function runCommand(raw: string, sh: Stagehand, page: any): Promise
     return true;
   }
 
-  // Resolve any inline @file references
-  line = await resolvePromptFiles(line);
-  line = line.replace(/\s+/g, " ").trim();
+  // ── Validate & resolve inline @file references and attachments at parse time ──
+  const attachCheck = await validateAndResolveAttachments(line);
+  if (!attachCheck.ok) {
+    console.error(`\n❌ Precondition Failed: ${attachCheck.error}\n`);
+    addToConversation({ role: "assistant", content: attachCheck.error!, label: "error" });
+    return false;
+  }
+  line = attachCheck.resolvedInput.replace(/\s+/g, " ").trim();
 
   // ── chain with ; ──
   if (line.includes(";") && !/^scan\s/i.test(line)) {

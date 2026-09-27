@@ -228,5 +228,89 @@
       "successRate": 0.5,
       "successCount": 1
     }
+  },
+  "playwright.dev": {
+    "schemaVersion": 1,
+    "domain": "playwright.dev",
+    "category": "unknown",
+    "techHints": [],
+    "shortcuts": {},
+    "endpoints": [],
+    "selectors": [],
+    "meta": {
+      "firstSeen": "2026-09-26T13:24:37.185Z",
+      "lastSeen": "2026-09-26T13:24:37.197Z",
+      "visitCount": 2,
+      "successRate": 1,
+      "successCount": 1
+    }
+  },
+  "github.com": {
+    "schemaVersion": 1,
+    "domain": "github.com",
+    "category": "unknown",
+    "techHints": [],
+    "shortcuts": {},
+    "endpoints": [],
+    "selectors": [],
+    "meta": {
+      "firstSeen": "2026-09-26T13:47:04.739Z",
+      "lastSeen": "2026-09-26T13:47:04.739Z",
+      "visitCount": 1,
+      "successRate": 0,
+      "successCount": 0
+    }
+  },
+  "docs.docker.com": {
+    "schemaVersion": 1,
+    "domain": "docs.docker.com",
+    "category": "unknown",
+    "techHints": [],
+    "shortcuts": {},
+    "endpoints": [
+      {
+        "urlPattern": "/consent/65425fb0-7b36-4317-9f10-7b3e08039af0/65425fb0-7b36-4317-9f10-7b3e08039af0.json",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-26T13:50:32.706Z"
+      },
+      {
+        "urlPattern": "/cookieconsentpub/v1/geo/location",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-26T13:50:32.706Z"
+      },
+      {
+        "urlPattern": "/consent/65425fb0-7b36-4317-9f10-7b3e08039af0/3be8fb06-ee81-4d6a-980a-b902e334d7f4/en.json",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-26T13:50:32.706Z"
+      },
+      {
+        "urlPattern": "{\"ShowInPopup\":true,\"ShowInPopupNonIAB\":true,\"ShowSDKListLink\":true,\"Order\":\"1\",\"OptanonGroupId\":\"C0003\",\"Par\n\n[/scripttemplates/202306.2.0/assets/otFlat.json",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-26T13:50:32.706Z"
+      },
+      {
+        "urlPattern": "/scripttemplates/202306.2.0/assets/v2/otPcCenter.json",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-26T13:50:32.706Z"
+      }
+    ],
+    "selectors": [],
+    "meta": {
+      "firstSeen": "2026-09-26T13:50:32.683Z",
+      "lastSeen": "2026-09-26T13:50:32.706Z",
+      "visitCount": 2,
+      "successRate": 1,
+      "successCount": 1
+    }
   }
 }
