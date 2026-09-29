@@ -42,6 +42,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import Fuse from "fuse.js";
 import type { TraceStep } from "./trace.js";
 
 // ── File paths ─────────────────────────────────────────────────────────────
@@ -141,6 +142,66 @@ export function trigramSimilarity(a: string, b: string): number {
   let inter = 0;
   for (const g of ta) if (tb.has(g)) inter++;
   return (2 * inter) / (ta.size + tb.size);
+}
+
+// ── Slot value fuzzy normalization (fuse.js) ───────────────────────────────
+//
+// When a user types "milliner" but means "millionaire", fuse.js can find the
+// correct slot value in a known list (e.g. previously seen song titles).
+// This is used as a pre-step before pattern extraction to fix typos in slot values.
+//
+// The known list is built lazily from all example goals in the pattern store.
+
+let _fuseIndex: Fuse<string> | null = null;
+let _fuseList: string[] = [];
+
+function refreshFuseIndex(): void {
+  const store = loadPatterns();
+  const seen = new Set<string>();
+  for (const t of Object.values(store)) {
+    for (const goal of t.exampleGoals) {
+      // Extract all non-stop-word tokens as known values
+      goal.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter(w => w.length > 2 && !["play","watch","youtube","google","the","and","by","on","from","in","at","for","of","a","an"].includes(w))
+        .forEach(w => seen.add(w));
+    }
+  }
+  _fuseList = Array.from(seen);
+  _fuseIndex = new Fuse(_fuseList, {
+    includeScore: true,
+    threshold: 0.35, // allow ~35% character difference
+    minMatchCharLength: 3,
+  });
+}
+
+/**
+ * Attempt to fuzzy-correct a single word against known slot values.
+ * Returns the best match if score is good, otherwise returns the original.
+ * Used for typo correction: "milliner" → "millionaire"
+ */
+export function fuzzyCorrectSlotWord(word: string): string {
+  if (!word || word.length < 4) return word;
+  if (!_fuseIndex || _fuseList.length === 0) refreshFuseIndex();
+  if (!_fuseIndex || _fuseList.length === 0) return word;
+  const results = _fuseIndex.search(word);
+  if (results.length > 0 && results[0]) {
+    const best = results[0];
+    // Only correct if the score is very good AND the match is substantially different
+    if ((best.score ?? 1) < 0.2 && best.item !== word && trigramSimilarity(word, best.item) > 0.45) {
+      return best.item;
+    }
+  }
+  return word;
+}
+
+/**
+ * Invalidate the fuse index cache after new patterns are recorded.
+ */
+export function invalidateFuseCache(): void {
+  _fuseIndex = null;
+  _fuseList = [];
 }
 
 // ── Slot similarity ─────────────────────────────────────────────────────────
@@ -435,6 +496,7 @@ export function recordPattern(params: {
   };
   store[patternKey] = template;
   savePatterns(store);
+  invalidateFuseCache(); // rebuild slot value index with new known words
   return template;
 }
 

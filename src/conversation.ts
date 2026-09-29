@@ -35,26 +35,31 @@ export function resetSessionMetrics(): void {
  * Everything else (history, metrics, old conversation) is cleared.
  */
 export function softResetSession(): void {
-  // Keep the last pinned extraction entry and last answer — discard everything else
-  const lastExtraction = session.conversation.findLast(
+  // Carry forward ALL pinned extractions + the last answer from the previous task.
+  // This allows immediate follow-up questions to reference any data extracted in the last run.
+  // Example: user asks "check banh house timing" → extracts hours → asks "can I visit at 4:30?"
+  //          → soft reset carries Banh House hours + "open 12-10:30" answer forward.
+  const pinnedExtractions = session.conversation.filter(
     (e) => e.label === "extraction" && e.pinned
   );
   const lastAnswer = session.conversation.findLast(
     (e) => e.label === "answer"
   );
 
+  // Keep the most recent extraction's content in lastExtraction for quick access
+  const lastExtraction = pinnedExtractions[pinnedExtractions.length - 1];
   session.lastExtraction = lastExtraction?.content.split("\n").slice(1).join("\n") ?? "";
-  session.lastAnswer = "";  // answer is in conversation, not needed separately
+  session.lastAnswer = "";  // answer is in conversation entries, not needed separately
   session.batchResults = [];
   session.history = [];
 
-  // Rebuild conversation with only the carried-forward entries
+  // Rebuild conversation: all pinned extractions + last answer (most recent context only)
   const carried: ConversationEntry[] = [];
-  if (lastExtraction) carried.push({ ...lastExtraction, pinned: true });
-  if (lastAnswer)     carried.push({ ...lastAnswer,     pinned: false });
+  for (const ext of pinnedExtractions) carried.push({ ...ext, pinned: true });
+  if (lastAnswer) carried.push({ ...lastAnswer, pinned: false });
   session.conversation = carried;
 
-  // Keep attachedFiles
+  // Keep attachedFiles — user may want to keep docs across tasks
   resetSessionMetrics();
 }
 
@@ -127,15 +132,10 @@ export function addToConversation(entry: ConversationEntry): void {
   }
 }
 
-/** Pin the latest extraction, unpinning older extractions so only the most recent remains pinned.
- *  Also deduplicates: if the same URL (normalized, no query params) was already pinned, replace in-place. */
+/** Pin a new extraction, keeping all previous pinned extractions too.
+ *  Deduplicates: if the same URL (normalized, no query params) was already pinned, replace in-place.
+ *  All extractions stay pinned so softResetSession can carry ALL of them to the next task. */
 export function pinLatestExtraction(content: string, sourceUrl: string): void {
-  // Unpin all existing extraction entries
-  for (const entry of session.conversation) {
-    if (entry.label === "extraction") {
-      entry.pinned = false;
-    }
-  }
   session.lastExtraction = content;
 
   // Normalize URL for dedup: strip query params and fragments, keep only scheme+host+path
@@ -355,19 +355,24 @@ export function isConversational(input: string): boolean {
   const hasUrl = /https?:\/\//i.test(trimmed) || /^[a-z0-9-]+\.[a-z]{2,}/i.test(trimmed);
   if (hasUrl) return false;
 
-  // Context-referencing follow-up signals (e.g. "can I visit at 4:30 given those hours?")
-  // These override webKeywords when there's prior session context
-  const contextFollowUpSignals = /\b(given|based on|using|with|those|that info|the hours|the data|the result|i extracted|you found|from earlier|from above|can i|could i|should i|would i|is it|will it|am i|does it|did it)\b/i;
+  // Context-referencing follow-up signals — override webKeywords when prior context exists
+  const contextFollowUpSignals = /\b(given|based on|using|with|those|that info|the hours|the timing|the data|the result|i extracted|you found|from earlier|from above|can i|could i|should i|would i|is it|will it|am i|does it|did it)\b/i;
   if (contextFollowUpSignals.test(trimmed) && session.conversation.length > 0) return true;
 
   // Time/reasoning about extracted data with no navigation intent
-  const reasoningSignals = /\b(at \d+:\d+|at \d+ (am|pm)|is it open|can i (go|visit|make it)|hours|opening|closing|am i late|will i|by the time)\b/i;
+  const reasoningSignals = /\b(at \d+:\d+|at \d+ (am|pm)|is it open|can i (go|visit|make it)|timing|timings|hours|opening|closing|am i late|will i|by the time|current time|what time)\b/i;
   if (reasoningSignals.test(trimmed) && session.conversation.length > 0) return true;
 
-  // Navigation/action keywords → definitely web (but don't catch "visit" when it's about checking hours)
-  // Exclude "visit" and "check" from web keywords when session has prior context
-  const hasContextualVisit = /\bvisit\b.*\d+/i.test(trimmed); // "visit at 4:30" → contextual
-  const webKeywords = hasContextualVisit && session.conversation.length > 0
+  // Navigation/action keywords → definitely web
+  // Remove "check" from this list when session has prior context (e.g. "check if banh house is open"
+  // should go to web, but "check the timing" with prior context should be conversational)
+  const hasContextualCheck =
+    /\b(check|verify)\b/i.test(trimmed) &&
+    session.conversation.length > 0 &&
+    reasoningSignals.test(trimmed); // only bypass "check" when combined with reasoning signals
+  const hasContextualVisit = /\bvisit\b.*\d+/i.test(trimmed);
+  const relaxedWebKeywords = hasContextualVisit || hasContextualCheck;
+  const webKeywords = relaxedWebKeywords
     ? /\b(go to|goto|open|navigate|search|find|click|play|download|look up|browse)\b/i
     : /\b(go to|goto|open|navigate|search|find|click|visit|play|download|check|verify|look up|browse)\b/i;
   if (webKeywords.test(trimmed)) return false;
@@ -376,7 +381,7 @@ export function isConversational(input: string): boolean {
   const refSignals = /\b(the roles|the jobs|those|that data|the extraction|earlier|previous|above|last)\b/i;
   if (refSignals.test(trimmed)) return true;
 
-  // Narrow this: require an explicit reference to prior data or analysis, not just any pronoun
+  // Explicit reference to prior data or analysis
   const talkSignals = /\b(my resume|my cv|does (it|this|that)|which of (these|those)|compare (this|these|it)|summarize (this|that)|based on (my|the))\b/i;
   if (talkSignals.test(trimmed) && session.conversation.length > 0) return true;
 
@@ -409,6 +414,16 @@ export async function handleConversational(input: string, localClient: any): Pro
   const context = getConversationContext();
   console.log(`\n💭 Thinking...\n`);
 
+  // Always inject current time so the LLM can reason about opening hours, visit times, etc.
+  const now = new Date();
+  const currentTimeIST = now.toLocaleTimeString("en-IN", {
+    hour: "2-digit", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata"
+  });
+  const currentDateIST = now.toLocaleDateString("en-IN", {
+    weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "Asia/Kolkata"
+  });
+  const currentTimeInfo = `\nCurrent time (IST): ${currentTimeIST} on ${currentDateIST}`;
+
   try {
     const c: any = await withTimeout(
       localClient.chat.completions.create({
@@ -418,12 +433,15 @@ export async function handleConversational(input: string, localClient: any): Pro
             role: "system",
             content: `You are an expert AI assistant with access to the user's browsing and session history.
 The user has been browsing websites and extracting data. Below is the conversation context including any data extracted from websites, user-provided documents (resumes, etc.), and prior Q&A.
+${currentTimeInfo}
 
 Session Context:
 ${context || "(No prior context in this session yet.)"}
 
 Rules:
 - Answer the user's question directly, concisely, and accurately based on the session context.
+- The current date and time (IST) is provided above — use it for any questions about "now", "today", "current time", whether somewhere is "currently open", or "can I visit at X time".
+- If the session context contains business hours or opening times, use them together with the current time to answer visit/timing questions.
 - If the user asks you to compare a resume/profile against job postings or extracted requirements, do a thorough line-by-line comparison and highlight strengths and gaps.
 - If the session context does not contain the specific data needed to answer (e.g. job listings, page content), say so explicitly and tell the user what to attach or extract — do not guess, assume, or use general knowledge as if it were the extracted data.
 - Format cleanly with bullet points or tables where appropriate.`,

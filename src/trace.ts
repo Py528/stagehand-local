@@ -42,6 +42,13 @@ export interface ExecutionTrace {
   goal: string;
   /** Normalised tokens from goal (lowercased, stop-words removed) */
   goalTokens: string[];
+  /**
+   * Structural skeleton of the goal — slot values replaced with SLOT placeholders.
+   * e.g. "play SLOT by SLOT on youtube"
+   * Used for structural matching instead of keyword overlap.
+   * Populated from patterns.ts extractPattern() output.
+   */
+  skeleton?: string;
   /** Service determined by compiler: youtube | google | careers_ats | generic */
   service: string;
   /** Intent: media_play | info_extract | form_fill | general_navigate */
@@ -221,7 +228,9 @@ export function recordTrace(params: TraceRecordingParams): ExecutionTrace {
  * Scoring rubric (adds to ~1.0):
  *   0.35  — service exact match (hard-required; returns 0 on mismatch)
  *   0.25  — intent exact match
- *   0.25  — Jaccard token similarity (goal tokens)
+ *   0.25  — Structural similarity:
+ *             • If both have skeletons: skeleton match (exact=1.0, partial based on shared SLOT positions)
+ *             • If skeleton missing: Jaccard token similarity (legacy fallback)
  *   0.10  — same answer domain bonus
  *   0.05  — replay reliability bonus
  */
@@ -230,7 +239,8 @@ export function scoreTrace(
   service: string,
   intent: string,
   goalTokens: string[],
-  answerDomain?: string
+  answerDomain?: string,
+  incomingSkeleton?: string
 ): number {
   if (trace.service !== service) return 0;
 
@@ -238,10 +248,29 @@ export function scoreTrace(
 
   if (trace.intent === intent) score += 0.25;
 
-  const incomingSet = new Set(goalTokens);
-  const traceSet = new Set(trace.goalTokens);
-  const jaccard = jaccardSimilarity(incomingSet, traceSet);
-  score += jaccard * 0.25;
+  // Structural similarity: skeleton-based beats Jaccard for cross-entity matching
+  if (incomingSkeleton && trace.skeleton) {
+    // Normalize: collapse SLOT names to generic SLOT for comparison
+    const normA = incomingSkeleton.replace(/\{\{[^}]+\}\}/g, "SLOT").replace(/SLOT_\w+/g, "SLOT");
+    const normB = trace.skeleton.replace(/\{\{[^}]+\}\}/g, "SLOT").replace(/SLOT_\w+/g, "SLOT");
+    if (normA === normB) {
+      // Exact structural match — full 0.25 even if tokens are different
+      score += 0.25;
+    } else {
+      // Partial skeleton match: count shared structural words
+      const wordsA = normA.split(/\s+/);
+      const wordsB = normB.split(/\s+/);
+      const sharedStructure = wordsA.filter(w => w !== "SLOT" && wordsB.includes(w)).length;
+      const totalStructure  = new Set([...wordsA.filter(w => w !== "SLOT"), ...wordsB.filter(w => w !== "SLOT")]).size;
+      score += totalStructure > 0 ? (sharedStructure / totalStructure) * 0.25 : 0;
+    }
+  } else {
+    // Legacy: Jaccard token similarity (no skeleton available)
+    const incomingSet = new Set(goalTokens);
+    const traceSet    = new Set(trace.goalTokens);
+    const jaccard     = jaccardSimilarity(incomingSet, traceSet);
+    score += jaccard * 0.25;
+  }
 
   if (answerDomain && trace.answerDomain === answerDomain) score += 0.10;
 
@@ -264,12 +293,17 @@ export function scoreTrace(
  * - REPLAY_THRESHOLD (0.72): high-confidence match (same tokens, same domain)
  * - REPLAY_THRESHOLD_STRUCTURAL (0.58): structural replay (same service+intent, different tokens)
  *   → replaces entity/creator tokens in step instructions and replays the path shape
+ *
+ * When skeleton is available (from patterns.ts extractPattern), skeleton similarity
+ * replaces Jaccard token overlap — enabling cross-entity matching:
+ * "play millionaire by honey singh" matches "play crown by txt" via skeleton.
  */
 export function findBestTrace(
   service: string,
   intent: string,
   goalTokens: string[],
-  answerDomain?: string
+  answerDomain?: string,
+  incomingSkeleton?: string
 ): TraceMatch | null {
   const store = loadTraces();
   const candidates = Object.values(store);
@@ -278,7 +312,7 @@ export function findBestTrace(
   let best: TraceMatch | null = null;
 
   for (const trace of candidates) {
-    const score = scoreTrace(trace, service, intent, goalTokens, answerDomain);
+    const score = scoreTrace(trace, service, intent, goalTokens, answerDomain, incomingSkeleton);
 
     // Determine the effective threshold for this candidate
     // For structural replays (same service+intent but different tokens), lower bar is acceptable

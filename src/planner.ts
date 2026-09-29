@@ -1051,13 +1051,18 @@ Return ONLY valid JSON action: {"action":"...","instruction":"..."|"url":"..."|"
     lastActionKey = actionKey;
 
     if (plan.action === "done") {
-      console.log(`\n🎉 ${plan.message || "Done!"}\n`);
+      const doneMsg = plan.message || "Done";
+      answer = doneMsg;
+      session.lastAnswer = doneMsg;
+      addToConversation({ role: "assistant", content: doneMsg, label: "answer" });
+      session.history.push({ ts: ts(), url, goal, result: doneMsg.slice(0, 2000) });
+      console.log(`\n🎉 ${doneMsg}\n`);
       logSessionMetrics();
       if (onStep) {
         const screenshot = await captureScreenshotBase64(page);
-        onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan, result: plan.message || "Done", screenshot });
+        onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan, result: doneMsg, screenshot });
       }
-      return plan.message || "Done";
+      return doneMsg;
     }
 
     if (plan.action === "wait") {
