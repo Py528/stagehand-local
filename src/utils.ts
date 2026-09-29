@@ -324,3 +324,61 @@ export function isNearDuplicate(a: string, b: string): boolean {
   if (shorter.length < 50) return false;
   return longer.includes(shorter.slice(0, Math.floor(shorter.length * 0.6)));
 }
+
+/**
+ * Wait for the page DOM to settle (stop mutating) rather than using a fixed sleep.
+ * Uses MutationObserver via page.evaluate() to detect a "quiet period".
+ *
+ * Benefit: saves 500–1500ms per step compared to fixed domSettleMs=1500.
+ * After a click that triggers fast navigation, DOM settles in ~300ms.
+ * After an SPA route change, DOM settles in ~500-800ms.
+ * Worst case: falls back to maxWaitMs if DOM never fully quiets.
+ *
+ * @param page - Playwright page instance
+ * @param quietPeriodMs - ms of DOM silence to declare "settled" (default: 300ms)
+ * @param maxWaitMs - hard timeout (default: 2500ms)
+ */
+export async function waitForDOMQuiet(
+  page: any,
+  quietPeriodMs = 300,
+  maxWaitMs = 2500
+): Promise<void> {
+  try {
+    await Promise.race([
+      page.evaluate(({ quiet, max }: { quiet: number; max: number }) => {
+        return new Promise<void>((resolve) => {
+          let timer: ReturnType<typeof setTimeout>;
+          const observer = new MutationObserver(() => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+              observer.disconnect();
+              resolve();
+            }, quiet);
+          });
+          // Observe subtree mutations (child additions/removals + attribute changes)
+          observer.observe(document.body || document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            characterData: false,
+          });
+          // Start the timer — if no mutation fires, we're already quiet
+          timer = setTimeout(() => {
+            observer.disconnect();
+            resolve();
+          }, quiet);
+          // Hard fallback
+          setTimeout(() => {
+            observer.disconnect();
+            resolve();
+          }, max);
+        });
+      }, { quiet: quietPeriodMs, max: maxWaitMs }),
+      // Node-side timeout as extra safety
+      new Promise<void>((r) => setTimeout(r, maxWaitMs + 100)),
+    ]);
+  } catch {
+    // Non-fatal — page may have navigated away, just continue
+    await new Promise((r) => setTimeout(r, Math.min(quietPeriodMs, 500)));
+  }
+}

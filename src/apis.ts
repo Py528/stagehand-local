@@ -180,15 +180,76 @@ interface YouTubeVideoResult {
 export async function searchYouTube(query: string): Promise<YouTubeVideoResult[] | null> {
   const t0 = Date.now();
 
-  // Strategy A: scrape YouTube search page (no API key needed)
+  // Strategy A: InnerTube API — YouTube's own internal search API (no key, ~100-200ms)
+  // This is the same API that youtube.com uses, much faster than scraping HTML
+  try {
+    const body = JSON.stringify({
+      query,
+      context: {
+        client: {
+          clientName: "WEB",
+          clientVersion: "2.20240101.00.00",
+          hl: "en",
+          gl: "US",
+        },
+      },
+    });
+
+    const response = await new Promise<string>((resolve, reject) => {
+      const req = https.request({
+        hostname: "www.youtube.com",
+        path: "/youtubei/v1/search?prettyPrint=false",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+          "X-YouTube-Client-Name": "1",
+          "X-YouTube-Client-Version": "2.20240101.00.00",
+        },
+        timeout: 4000,
+      }, (res) => {
+        let data = "";
+        res.on("data", (c) => { data += c; });
+        res.on("end", () => resolve(data));
+      });
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+      req.write(body);
+      req.end();
+    });
+
+    const data = JSON.parse(response);
+    const contents =
+      data?.contents?.twoColumnSearchResultsRenderer?.primaryContents
+        ?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents ?? [];
+
+    const videos: YouTubeVideoResult[] = [];
+    for (const item of contents) {
+      const vr = item?.videoRenderer;
+      if (!vr?.videoId) continue;
+      videos.push({
+        videoId: vr.videoId,
+        title: vr.title?.runs?.[0]?.text ?? "",
+        channelTitle: vr.ownerText?.runs?.[0]?.text ?? "",
+        watchUrl: `https://www.youtube.com/watch?v=${vr.videoId}`,
+      });
+      if (videos.length >= 5) break;
+    }
+
+    if (videos.length > 0) {
+      console.log(`   🎬 InnerTube API: found ${videos.length} results in ${Date.now()-t0}ms`);
+      return videos;
+    }
+  } catch { /* fall through to scrape */ }
+
+  // Strategy B: ytInitialData HTML scrape fallback (slightly slower but works when InnerTube is blocked)
   try {
     const encodedQuery = encodeURIComponent(query);
     const html = await fetchText(
-      `https://www.youtube.com/results?search_query=${encodedQuery}&sp=EgIQAQ%3D%3D`, // sp = songs filter
+      `https://www.youtube.com/results?search_query=${encodedQuery}`,
       5000
     );
-
-    // Extract ytInitialData JSON from the page
     const match = html.match(/var ytInitialData\s*=\s*({.+?});<\/script>/s);
     if (!match) return null;
 
@@ -211,10 +272,10 @@ export async function searchYouTube(query: string): Promise<YouTubeVideoResult[]
     }
 
     if (videos.length > 0) {
-      console.log(`   🎬 YouTube API (scrape): found ${videos.length} results in ${Date.now()-t0}ms`);
+      console.log(`   🎬 YouTube scrape fallback: found ${videos.length} results in ${Date.now()-t0}ms`);
       return videos;
     }
-  } catch { /* fall through */ }
+  } catch {}
 
   return null;
 }
