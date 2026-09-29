@@ -16,6 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { matchAllSlots, slotTypesFromPattern } from "./slot-matcher.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -320,6 +321,34 @@ export function scoreTrace(
     }
   }
 
+  // ── Slot semantic similarity bonus ────────────────────────────────────────
+  // When the structural pattern matches but slot values differ ("millioner" vs
+  // "millionaire"), use Jaro-Winkler + phonetic matching to detect variants.
+  // This replaces the old Jaccard approach which gave 0% for non-overlapping tokens.
+  // Only applied when skeleton matches (structural replay candidate).
+  if (incomingSkeleton && trace.skeleton && trace.entity) {
+    try {
+      const patternKey = `${trace.service}::${trace.intent}::${
+        [trace.entity ? "SONG" : "", trace.creator ? "ARTIST" : ""].filter(Boolean).join("+")
+      }`;
+      const querySlots:  Record<string, string> = {};
+      const storedSlots: Record<string, string> = {};
+      if (trace.entity)  { storedSlots["SONG"]   = trace.entity; }
+      if (trace.creator) { storedSlots["ARTIST"]  = trace.creator; }
+      // Extract incoming entity/creator from tokens (rough approximation)
+      const incoming = goalTokens.slice(0, 3).join(" ");
+      if (trace.entity)  querySlots["SONG"]   = incoming;
+      if (trace.creator) querySlots["ARTIST"]  = goalTokens.slice(3).join(" ") || incoming;
+
+      if (Object.keys(querySlots).length > 0) {
+        const slotTypes = slotTypesFromPattern(patternKey);
+        const slotScore = matchAllSlots(querySlots, storedSlots, slotTypes);
+        // Bonus: up to 0.05 for good slot similarity (above 0.80)
+        if (slotScore > 0.80) score += 0.05;
+      }
+    } catch { /* non-fatal */ }
+  }
+
   return Math.max(0, Math.min(1, score));
 }
 
@@ -621,56 +650,126 @@ export async function replayWithSelectorChain(
  * After a successful act(), extract a SelectorChain from the element
  * that was just clicked. Call this post-act to upgrade concrete XPath
  * traces to stable semantic selectors.
+ *
+ * Uses document.activeElement as primary anchor (set by the click).
+ * Filters unstable auto-generated IDs (UUID, React :r0:, Vue data-v-*).
+ * Extracts semantic parent landmark for context disambiguation.
  */
 export async function extractSelectorChain(
   page: any,
-  xpathOrCss: string
+  xpathOrCss?: string
 ): Promise<SelectorChain | null> {
   try {
-    const chain = await page.evaluate((selector: string): SelectorChain | null => {
-      // Try to find the element using the selector
-      let el: Element | null = null;
-      try {
-        // Try CSS first
-        el = document.querySelector(selector);
-        if (!el) {
-          // Try XPath
-          const result = document.evaluate(
-            selector, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
-          );
-          el = result.singleNodeValue as Element | null;
+    // Patterns for unstable IDs — serialized as strings to cross the evaluate() boundary
+    const UNSTABLE_ID_PATTERNS = [
+      "^[0-9a-f]{8}-[0-9a-f]{4}",  // UUID
+      "^\\d+$",                      // pure number
+      "^[0-9a-f]{16,}$",            // long hex (React/Vue component IDs)
+      "^:r[0-9a-z]+:$",             // React internal ":r0:"
+      "^__next",                     // Next.js internals
+      "^radix-",                     // Radix UI auto-IDs
+    ];
+    const UNSTABLE_DATA_PREFIXES = [
+      "data-v-",          // Vue scoped CSS hashes
+      "data-reactid",     // old React
+      "data-react-",      // React internals
+      "data-popper-",     // Floating UI runtime
+      "data-radix-",      // Radix UI runtime state
+    ];
+
+    const extracted = await Promise.race([
+      page.evaluate((params: {
+        fallbackSelector: string | undefined;
+        unstableIdPatterns: string[];
+        unstableDataPrefixes: string[];
+      }): SelectorChain | null => {
+        // Find element: activeElement (set by click) → fallback via CSS/XPath
+        let el: Element | null = null;
+
+        if (document.activeElement && document.activeElement !== document.body) {
+          el = document.activeElement;
         }
-      } catch { return null; }
 
-      if (!el) return null;
+        if (!el && params.fallbackSelector) {
+          try {
+            el = document.querySelector(params.fallbackSelector);
+            if (!el && params.fallbackSelector.startsWith("/")) {
+              const result = document.evaluate(
+                params.fallbackSelector, document, null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE, null
+              );
+              el = result.singleNodeValue as Element | null;
+            }
+          } catch { /* ignore */ }
+        }
 
-      // Extract stable identifiers
-      const role   = el.getAttribute("role") ||
-                     el.tagName.toLowerCase().replace("ytd-", "").split("-")[0] || "";
-      const ariaLabel = el.getAttribute("aria-label") || "";
-      const textContent = (el as HTMLElement).innerText?.trim().slice(0, 80) || "";
-      const id     = el.id ? `#${el.id}` : "";
-      const dataId = Array.from(el.attributes)
-        .find(a => a.name.startsWith("data-") && a.value.length < 50);
+        if (!el) return null;
 
-      // Build stable CSS selector (prefer id > data-* > tagName+class pattern)
-      const parent = el.parentElement;
-      const parentTag = parent?.tagName.toLowerCase() ?? "";
-      let css = "";
-      if (id) css = id;
-      else if (dataId) css = `[${dataId.name}="${dataId.value}"]`;
-      else if (parentTag && id) css = `${parentTag} ${id}`;
-      else if (el.tagName === "A" && parentTag.includes("video")) css = `${parentTag} a`;
+        const tagName = el.tagName.toLowerCase();
 
-      // exactOptionalPropertyTypes: only include defined fields
-      const out: SelectorChain = {};
-      if (role && textContent) out.role = { role: role === "a" ? "link" : role, name: textContent.slice(0, 50) };
-      if (textContent) out.text = textContent;
-      if (css) out.css = css;
-      return out;
-    }, xpathOrCss);
+        // ── ARIA role ──────────────────────────────────────────────────────
+        const explicitRole = el.getAttribute("role");
+        const implicitRoleMap: Record<string, string> = {
+          a: "link", button: "button", input: "textbox",
+          select: "listbox", textarea: "textbox",
+          h1: "heading", h2: "heading", h3: "heading",
+        };
+        const ariaRole = explicitRole || implicitRoleMap[tagName] || tagName;
 
-    return chain;
+        // ── Accessible name (W3C priority order) ──────────────────────────
+        const labelledById = el.getAttribute("aria-labelledby");
+        const labelledByEl = labelledById ? document.getElementById(labelledById) : null;
+        const accessibleName =
+          el.getAttribute("aria-label") ||
+          (labelledByEl ? labelledByEl.textContent?.trim() : null) ||
+          el.getAttribute("title") ||
+          el.getAttribute("alt") ||
+          (el as HTMLElement).innerText?.trim().slice(0, 100) ||
+          null;
+
+        // ── Stable CSS selector ────────────────────────────────────────────
+        // Only use ID if it looks semantic (not auto-generated)
+        const id = (el as HTMLElement).id;
+        const idIsStable = id ? !params.unstableIdPatterns.some(p => new RegExp(p).test(id)) : false;
+
+        const stableDataAttrs = Array.from(el.attributes)
+          .filter(a =>
+            a.name.startsWith("data-") &&
+            !params.unstableDataPrefixes.some(p => a.name.startsWith(p)) &&
+            a.value.length < 64
+          )
+          .map(a => `[${a.name}="${a.value}"]`);
+
+        let css: string | undefined;
+        if (idIsStable) {
+          css = `${tagName}#${id}`;
+        } else if (stableDataAttrs.length > 0) {
+          css = `${tagName}${stableDataAttrs.slice(0, 2).join("")}`;
+        } else if (tagName === "a" && el.parentElement?.tagName.toLowerCase().includes("video")) {
+          // YouTube video title pattern — stable selector
+          css = `${el.parentElement.tagName.toLowerCase()} a`;
+        }
+
+        // ── Build SelectorChain ────────────────────────────────────────────
+        const out: SelectorChain = {};
+        if (ariaRole && accessibleName) {
+          out.role = { role: ariaRole === "a" ? "link" : ariaRole, name: accessibleName.slice(0, 80) };
+        }
+        if (accessibleName) out.text = accessibleName.slice(0, 100);
+        if (css) out.css = css;
+        const lw = out.role ? "role" as const : out.text ? "text" as const : out.css ? "css" as const : null;
+        if (lw) out.lastWorking = lw;
+
+        return Object.keys(out).length > 1 ? out : null;
+      }, {
+        fallbackSelector: xpathOrCss,
+        unstableIdPatterns: UNSTABLE_ID_PATTERNS,
+        unstableDataPrefixes: UNSTABLE_DATA_PREFIXES,
+      }),
+      new Promise<null>(r => setTimeout(() => r(null), 2000)),
+    ]);
+
+    return extracted;
   } catch {
     return null;
   }

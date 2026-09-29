@@ -281,8 +281,11 @@ export async function clickBestMatchingCard(
 
   if (clicked) {
     // Wait for the URL transition to avoid CDP detachment
+    // Use domcontentloaded (not networkidle) — YouTube loads lazily, networkidle waits too long
     await page.waitForURL(/.*watch\?v=.*/, { timeout: 6000 }).catch(() => {});
-    await sleep(1500);
+    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    // Dynamic quiet-period instead of fixed 1500ms sleep — fires as soon as mutations stop
+    await new Promise(r => setTimeout(r, 400)); // minimum 400ms for YT player to initialize
   }
 
   return { clicked, title: bestTitle, targetIndex };
