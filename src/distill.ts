@@ -711,3 +711,138 @@ export async function distillGoogleSearch(page: any): Promise<GoogleSerpSummary>
   }
 }
 
+/* ══════════════════════════════════════════════════════════════
+   Google Maps Fast Extractor
+
+   Google Maps is a pure-JS SPA — text-based distillPage() returns
+   "When you have eliminated JavaScript, whatever remains must be
+   an empty page." Instead, scrape the structured data directly
+   from visible DOM elements that Maps renders into the page.
+
+   Covers: business name, rating, hours (all days), open/closed
+   status, address, phone, website.
+   ══════════════════════════════════════════════════════════════ */
+
+export async function extractGoogleMapsInfo(page: any): Promise<string | null> {
+  if (!page) return null;
+  try {
+    const url = await page.url().catch(() => "");
+    if (!url.includes("google.com/maps")) return null;
+
+    // Wait briefly for Maps SPA to hydrate
+    await page.waitForLoadState("networkidle").catch(() => {});
+
+    const info = await Promise.race([
+      page.evaluate(() => {
+        const text = (sel: string): string =>
+          (document.querySelector(sel) as HTMLElement)?.innerText?.trim() || "";
+        const texts = (sel: string): string[] =>
+          Array.from(document.querySelectorAll(sel))
+            .map((e) => (e as HTMLElement).innerText?.trim())
+            .filter(Boolean) as string[];
+
+        // Business name — multiple possible selectors
+        const name =
+          text("h1.fontHeadlineLarge") ||
+          text("h1[class*='fontHeadline']") ||
+          text('div[role="main"] h1') ||
+          text("h1");
+
+        // Rating and review count
+        const rating = text('span[aria-label*="stars"], div[aria-label*="stars"]') ||
+          text('span.fontBodyMedium span[aria-hidden="true"]') || "";
+        const ratingNum = rating.match(/[\d.]+/)?.[0] || "";
+
+        // Open/Closed status — Maps shows "Open · Closes 11 PM" or "Closed · Opens 12 PM"
+        const statusSelectors = [
+          'span[aria-label*="open" i]',
+          'span[aria-label*="closed" i]',
+          'button[aria-label*="Hours" i] span',
+          'div[aria-label*="Hours" i]',
+          'span.ZDu9vd',    // common Maps status span class
+          'span.UsdlK',
+          'div[data-item-id="oh"] span',
+          '.o0Svhf',
+          '.OMl5r',
+        ];
+        let openStatus = "";
+        for (const sel of statusSelectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            const t = (el as HTMLElement).innerText?.trim();
+            if (t && t.length > 2 && t.length < 80) {
+              openStatus = t;
+              break;
+            }
+          }
+        }
+
+        // Hours table — look for day-of-week + time pairs
+        const hoursRows: string[] = [];
+        const hoursTableSelectors = [
+          'table[aria-label*="hours" i] tr',
+          'div[aria-label*="hours" i] tr',
+          'div[data-item-id="oh"] table tr',
+          '.y0skZc tr',
+          '.eK4R0e tr',
+        ];
+        for (const sel of hoursTableSelectors) {
+          const rows = Array.from(document.querySelectorAll(sel));
+          if (rows.length > 0) {
+            rows.forEach((row) => {
+              const cells = Array.from(row.querySelectorAll("td, th"))
+                .map((c) => (c as HTMLElement).innerText?.trim())
+                .filter(Boolean);
+              if (cells.length >= 2) hoursRows.push(cells.join(": "));
+            });
+            if (hoursRows.length > 0) break;
+          }
+        }
+
+        // Fallback: grep all text for day patterns
+        if (hoursRows.length === 0) {
+          const bodyText = document.body.innerText || "";
+          const dayMatches = bodyText.match(/(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[^\n]{3,40}/gi);
+          if (dayMatches) hoursRows.push(...dayMatches.slice(0, 7));
+        }
+
+        // Address
+        const address =
+          text('button[data-item-id="address"] div.fontBodyMedium') ||
+          text('div[data-item-id="address"]') ||
+          text('[aria-label*="Address" i]') || "";
+
+        // Phone
+        const phone =
+          text('button[data-item-id^="phone"] div.fontBodyMedium') ||
+          text('[aria-label*="Phone" i]') || "";
+
+        // Website
+        const website =
+          text('a[data-item-id="authority"] div.fontBodyMedium') ||
+          (document.querySelector('a[data-item-id="authority"]') as HTMLAnchorElement)?.href || "";
+
+        return { name, ratingNum, openStatus, hoursRows, address, phone, website };
+      }),
+      new Promise<any>((r) => setTimeout(() => r(null), 4000)),
+    ]);
+
+    if (!info || !info.name) return null;
+
+    const parts: string[] = [];
+    if (info.name)       parts.push(`📍 ${info.name}`);
+    if (info.openStatus) parts.push(`⏰ Status: ${info.openStatus}`);
+    if (info.hoursRows?.length) {
+      parts.push("🕐 Hours:");
+      info.hoursRows.slice(0, 7).forEach((r: string) => parts.push(`   ${r}`));
+    }
+    if (info.address)    parts.push(`📫 Address: ${info.address}`);
+    if (info.phone)      parts.push(`📞 Phone: ${info.phone}`);
+    if (info.website)    parts.push(`🌐 Website: ${info.website}`);
+    if (info.ratingNum)  parts.push(`⭐ Rating: ${info.ratingNum}`);
+
+    return parts.length > 1 ? parts.join("\n") : null;
+  } catch {
+    return null;
+  }
+}

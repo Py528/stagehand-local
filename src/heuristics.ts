@@ -933,7 +933,16 @@ async function tryGoogleSearchFastHop(
               href.includes("accounts.google") ||
               href.includes("support.google") ||
               href.includes("policies.google") ||
-              href.includes("webcache")
+              href.includes("webcache") ||
+              // Block social media & low-value result domains for hours/info queries
+              href.includes("instagram.com") ||
+              href.includes("facebook.com") ||
+              href.includes("twitter.com") ||
+              href.includes("x.com") ||
+              href.includes("tiktok.com") ||
+              href.includes("pinterest.com") ||
+              href.includes("youtube.com") ||
+              href.includes("linkedin.com")
             ) {
               continue;
             }
@@ -950,7 +959,15 @@ async function tryGoogleSearchFastHop(
             href.includes("google.") ||
             href.includes("/search?") ||
             href.includes("/aclk") ||
-            href.includes("webcache")
+            href.includes("webcache") ||
+            href.includes("instagram.com") ||
+            href.includes("facebook.com") ||
+            href.includes("twitter.com") ||
+            href.includes("x.com") ||
+            href.includes("tiktok.com") ||
+            href.includes("pinterest.com") ||
+            href.includes("youtube.com") ||
+            href.includes("linkedin.com")
           ) {
             continue;
           }
@@ -1486,6 +1503,20 @@ export async function tryHeuristic(
 ): Promise<HeuristicResult | null> {
   try {
     const effectivePlan = plan || fastCompileGoal(goal);
+
+    // -1. Current time/date fast-path: answer directly from JS without any browser navigation
+    const timeGoal = goal.toLowerCase();
+    if (
+      /\b(current|what|tell me|what's|whats).{0,20}(time|day|date|hour)\b/i.test(goal) ||
+      /\b(time|date|day).{0,20}\b(now|today|current)\b/i.test(goal) ||
+      /\bwhat time is it\b/i.test(goal)
+    ) {
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata" });
+      const dateStr = now.toLocaleDateString("en-IN", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "Asia/Kolkata" });
+      const answer = `Current time in India (IST): ${timeStr}\nDate: ${dateStr}`;
+      return { description: `⚡ Heuristic: Current time from system clock`, doneMessage: answer };
+    }
 
     // 0. From about:blank, navigate directly to YouTube search if intent is to play/watch on YouTube
     if (url === "about:blank" || url.startsWith("about:")) {

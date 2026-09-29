@@ -72,9 +72,9 @@
       {
         "urlPattern": "/s/i/youtube_fill_experimental/gaming/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 11,
+        "successCount": 12,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.582Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/help_circle/v2/24px.svg",
@@ -86,9 +86,9 @@
       {
         "urlPattern": "/s/i/youtube_outline_experimental/gaming/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 11,
+        "successCount": 12,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.582Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/copy/v3/24px.svg",
@@ -100,9 +100,9 @@
       {
         "urlPattern": "/s/i/youtube_outline_experimental/clapperboard/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 9,
+        "successCount": 10,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.724Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/clapperboard/v3/24px.svg",
@@ -128,37 +128,37 @@
       {
         "urlPattern": "/s/i/youtube_fill_experimental/search/v15/24px.svg",
         "purpose": "search_results",
-        "successCount": 9,
+        "successCount": 10,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/video_camera_add/v2/24px.svg",
         "purpose": "media_metadata",
-        "successCount": 11,
+        "successCount": 12,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.924Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/live/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 9,
+        "successCount": 10,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.726Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/volume_mute/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 11,
+        "successCount": 12,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/volume_mute/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 11,
+        "successCount": 12,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/youtubei/v1/player",
@@ -177,51 +177,51 @@
       {
         "urlPattern": "/s/i/youtube_outline_experimental/history/v1/24px.svg",
         "purpose": "page_data",
-        "successCount": 4,
+        "successCount": 5,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:24:40.888Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/volume_max/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 9,
+        "successCount": 10,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/volume_max/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 10,
+        "successCount": 11,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/video/v3/24px.svg",
         "purpose": "media_metadata",
-        "successCount": 3,
+        "successCount": 4,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.924Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/arrow_down/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 2,
+        "successCount": 3,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.923Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/trophy/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 2,
+        "successCount": 3,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.924Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/trophy/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 2,
+        "successCount": 3,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:13:33.924Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/trending/v2/24px.svg",
@@ -248,10 +248,10 @@
     "selectors": [],
     "meta": {
       "firstSeen": "2026-09-26T11:00:14.790Z",
-      "lastSeen": "2026-09-29T08:14:40.582Z",
-      "visitCount": 16,
-      "successRate": 0.8125,
-      "successCount": 13
+      "lastSeen": "2026-09-29T09:13:33.922Z",
+      "visitCount": 17,
+      "successRate": 0.8235294117647058,
+      "successCount": 14
     },
     "archetypeId": "archetype_youtube_spa"
   },
@@ -353,6 +353,22 @@
       "visitCount": 2,
       "successRate": 1,
       "successCount": 1
+    }
+  },
+  "google.com": {
+    "schemaVersion": 1,
+    "domain": "google.com",
+    "category": "unknown",
+    "techHints": [],
+    "shortcuts": {},
+    "endpoints": [],
+    "selectors": [],
+    "meta": {
+      "firstSeen": "2026-09-29T09:22:31.268Z",
+      "lastSeen": "2026-09-29T09:22:31.268Z",
+      "visitCount": 1,
+      "successRate": 0,
+      "successCount": 0
     }
   }
 }

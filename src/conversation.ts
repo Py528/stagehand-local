@@ -92,7 +92,7 @@ export function addToConversation(entry: ConversationEntry): void {
 }
 
 /** Pin the latest extraction, unpinning older extractions so only the most recent remains pinned.
- *  Also deduplicates: if the same URL was already pinned, replace it in-place instead of appending. */
+ *  Also deduplicates: if the same URL (normalized, no query params) was already pinned, replace in-place. */
 export function pinLatestExtraction(content: string, sourceUrl: string): void {
   // Unpin all existing extraction entries
   for (const entry of session.conversation) {
@@ -102,10 +102,23 @@ export function pinLatestExtraction(content: string, sourceUrl: string): void {
   }
   session.lastExtraction = content;
 
-  // Deduplicate: if an extraction from this exact URL already exists, replace it
+  // Normalize URL for dedup: strip query params and fragments, keep only scheme+host+path
+  const normalizeUrl = (u: string): string => {
+    try {
+      const parsed = new URL(u);
+      return `${parsed.hostname}${parsed.pathname}`;
+    } catch {
+      return u.split("?")[0] ?? u;
+    }
+  };
+  const normalizedSource = normalizeUrl(sourceUrl);
+
+  // Deduplicate: if an extraction from this normalized URL already exists, replace it
   const newContent = `Extracted from ${sourceUrl}:\n${content}`;
   const existingIdx = session.conversation.findIndex(
-    (e) => e.label === "extraction" && e.content.startsWith(`Extracted from ${sourceUrl}`)
+    (e) => e.label === "extraction" && normalizeUrl(
+      e.content.match(/^Extracted from ([^\n]+):/)?.[1] ?? ""
+    ) === normalizedSource
   );
   if (existingIdx !== -1) {
     session.conversation[existingIdx] = {
@@ -306,8 +319,21 @@ export function isConversational(input: string): boolean {
   const hasUrl = /https?:\/\//i.test(trimmed) || /^[a-z0-9-]+\.[a-z]{2,}/i.test(trimmed);
   if (hasUrl) return false;
 
-  // Navigation/action keywords → definitely web
-  const webKeywords = /\b(go to|goto|open|navigate|search|find|click|visit|play|download|check|verify|look up|browse)\b/i;
+  // Context-referencing follow-up signals (e.g. "can I visit at 4:30 given those hours?")
+  // These override webKeywords when there's prior session context
+  const contextFollowUpSignals = /\b(given|based on|using|with|those|that info|the hours|the data|the result|i extracted|you found|from earlier|from above|can i|could i|should i|would i|is it|will it|am i|does it|did it)\b/i;
+  if (contextFollowUpSignals.test(trimmed) && session.conversation.length > 0) return true;
+
+  // Time/reasoning about extracted data with no navigation intent
+  const reasoningSignals = /\b(at \d+:\d+|at \d+ (am|pm)|is it open|can i (go|visit|make it)|hours|opening|closing|am i late|will i|by the time)\b/i;
+  if (reasoningSignals.test(trimmed) && session.conversation.length > 0) return true;
+
+  // Navigation/action keywords → definitely web (but don't catch "visit" when it's about checking hours)
+  // Exclude "visit" and "check" from web keywords when session has prior context
+  const hasContextualVisit = /\bvisit\b.*\d+/i.test(trimmed); // "visit at 4:30" → contextual
+  const webKeywords = hasContextualVisit && session.conversation.length > 0
+    ? /\b(go to|goto|open|navigate|search|find|click|play|download|look up|browse)\b/i
+    : /\b(go to|goto|open|navigate|search|find|click|visit|play|download|check|verify|look up|browse)\b/i;
   if (webKeywords.test(trimmed)) return false;
 
   // Questions that reference previously extracted data

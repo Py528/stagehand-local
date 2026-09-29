@@ -27,6 +27,7 @@ import {
   fastExtract,
   buildPlannerSnapshot,
   distillGoogleSearch,
+  extractGoogleMapsInfo,
 } from "./distill.js";
 import { tryHeuristic, resetAdSkipState } from "./heuristics.js";
 import { compileGoal, type ExecutionPlan } from "./compiler.js";
@@ -93,6 +94,19 @@ Available actions:
 
 /** Extract and return the raw text. */
 export async function extractText(sh: Stagehand, instruction: string, page: any): Promise<string> {
+  // 0. Google Maps fast-path — Maps is a pure-JS SPA, DOM text distillation returns empty.
+  //    Use the dedicated Maps DOM scraper instead.
+  try {
+    const url = await page.url().catch(() => "");
+    if (url.includes("google.com/maps")) {
+      const mapsData = await extractGoogleMapsInfo(page);
+      if (mapsData && mapsData.length > 30) {
+        console.log(`   🗺️  Google Maps structured extract (${mapsData.split("\n").length} fields)`);
+        return mapsData;
+      }
+    }
+  } catch { /* fall through */ }
+
   // 1. Try fast extract via distilled page content (smaller prompt → faster prefill)
   try {
     const distilled = await distillPage(page);
