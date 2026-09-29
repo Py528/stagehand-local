@@ -79,9 +79,9 @@
       {
         "urlPattern": "/s/i/youtube_outline_experimental/help_circle/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 9,
+        "successCount": 10,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.722Z"
+        "lastVerified": "2026-09-29T09:38:50.488Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/gaming/v3/24px.svg",
@@ -121,23 +121,23 @@
       {
         "urlPattern": "/s/i/youtube_fill_experimental/news/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 7,
+        "successCount": 8,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.725Z"
+        "lastVerified": "2026-09-29T09:38:50.489Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/search/v15/24px.svg",
         "purpose": "search_results",
-        "successCount": 10,
+        "successCount": 11,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.923Z"
+        "lastVerified": "2026-09-29T09:38:50.488Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/video_camera_add/v2/24px.svg",
         "purpose": "media_metadata",
-        "successCount": 12,
+        "successCount": 13,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.924Z"
+        "lastVerified": "2026-09-29T09:38:50.488Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/live/v3/24px.svg",
@@ -149,16 +149,16 @@
       {
         "urlPattern": "/s/i/youtube_outline_experimental/volume_mute/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 12,
+        "successCount": 13,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.923Z"
+        "lastVerified": "2026-09-29T09:38:50.488Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/volume_mute/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 12,
+        "successCount": 13,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.923Z"
+        "lastVerified": "2026-09-29T09:38:50.488Z"
       },
       {
         "urlPattern": "/youtubei/v1/player",
@@ -184,58 +184,58 @@
       {
         "urlPattern": "/s/i/youtube_fill_experimental/volume_max/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 10,
+        "successCount": 11,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.923Z"
+        "lastVerified": "2026-09-29T09:38:50.488Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/volume_max/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 11,
+        "successCount": 12,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.923Z"
+        "lastVerified": "2026-09-29T09:38:50.489Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/video/v3/24px.svg",
         "purpose": "media_metadata",
-        "successCount": 4,
+        "successCount": 5,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.924Z"
+        "lastVerified": "2026-09-29T09:38:50.489Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/arrow_down/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 3,
+        "successCount": 4,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.923Z"
+        "lastVerified": "2026-09-29T09:38:50.488Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/trophy/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 3,
+        "successCount": 4,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.924Z"
+        "lastVerified": "2026-09-29T09:38:50.488Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/trophy/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 3,
+        "successCount": 4,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T09:13:33.924Z"
+        "lastVerified": "2026-09-29T09:38:50.489Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/trending/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 2,
+        "successCount": 3,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:38:50.489Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/trending/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 2,
+        "successCount": 3,
         "failureCount": 0,
-        "lastVerified": "2026-09-29T08:14:40.583Z"
+        "lastVerified": "2026-09-29T09:38:50.489Z"
       },
       {
         "urlPattern": "/youtube/img/icons/web/youtube_fill/unplugged_logo/v2/24px.svg",
@@ -243,15 +243,22 @@
         "successCount": 2,
         "failureCount": 0,
         "lastVerified": "2026-09-29T08:14:40.583Z"
+      },
+      {
+        "urlPattern": "/api/timedtext",
+        "purpose": "page_data",
+        "successCount": 1,
+        "failureCount": 0,
+        "lastVerified": "2026-09-29T09:38:50.489Z"
       }
     ],
     "selectors": [],
     "meta": {
       "firstSeen": "2026-09-26T11:00:14.790Z",
-      "lastSeen": "2026-09-29T09:13:33.922Z",
-      "visitCount": 17,
-      "successRate": 0.8235294117647058,
-      "successCount": 14
+      "lastSeen": "2026-09-29T09:38:50.488Z",
+      "visitCount": 18,
+      "successRate": 0.8333333333333334,
+      "successCount": 15
     },
     "archetypeId": "archetype_youtube_spa"
   },
@@ -366,6 +373,22 @@
     "meta": {
       "firstSeen": "2026-09-29T09:22:31.268Z",
       "lastSeen": "2026-09-29T09:22:31.268Z",
+      "visitCount": 1,
+      "successRate": 0,
+      "successCount": 0
+    }
+  },
+  "zomato.com": {
+    "schemaVersion": 1,
+    "domain": "zomato.com",
+    "category": "unknown",
+    "techHints": [],
+    "shortcuts": {},
+    "endpoints": [],
+    "selectors": [],
+    "meta": {
+      "firstSeen": "2026-09-29T09:45:26.623Z",
+      "lastSeen": "2026-09-29T09:45:26.623Z",
       "visitCount": 1,
       "successRate": 0,
       "successCount": 0

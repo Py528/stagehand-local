@@ -846,3 +846,115 @@ export async function extractGoogleMapsInfo(page: any): Promise<string | null> {
     return null;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   Zomato Fast Extractor
+
+   Zomato pages are React SPAs. The distilled text often misses
+   key info like hours because it's in a component that renders
+   outside the main content flow. This scraper targets Zomato's
+   known DOM patterns to pull hours, status, address, and rating.
+   ══════════════════════════════════════════════════════════════ */
+
+export async function extractZomatoInfo(page: any): Promise<string | null> {
+  if (!page) return null;
+  try {
+    const url = await page.url().catch(() => "");
+    if (!url.includes("zomato.com")) return null;
+
+    const info = await Promise.race([
+      page.evaluate(() => {
+        const text = (sel: string): string =>
+          (document.querySelector(sel) as HTMLElement)?.innerText?.trim() || "";
+
+        // Restaurant name
+        const name =
+          text("h1.sc-7kepeu-0") ||
+          text("h1[class*='sc-']") ||
+          text("h1") || "";
+
+        // Hours / status — Zomato renders this in a specific pattern
+        // "Open now 12noon – 10:30pm (Today)" or "ClosedOpens at 12noon"
+        const hoursPatterns = [
+          'span[class*="open" i]',
+          'div[class*="open" i]',
+          'span[class*="timing" i]',
+          'p[class*="timing" i]',
+          '.sc-klSiHT',   // common Zomato hours class
+          '.sc-1q7bklc-1',
+          '.sc-rbojys-0',
+          'a[href*="/info"] span',
+        ];
+        let hours = "";
+        for (const sel of hoursPatterns) {
+          const el = document.querySelector(sel);
+          if (el) {
+            const t = (el as HTMLElement).innerText?.trim();
+            if (t && t.length > 3 && t.length < 100 &&
+                (t.toLowerCase().includes("open") || t.toLowerCase().includes("close") ||
+                 t.match(/\d+(am|pm|noon)/i))) {
+              hours = t;
+              break;
+            }
+          }
+        }
+
+        // Broader fallback: search all text nodes for hours pattern
+        if (!hours) {
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let node;
+          while ((node = walker.nextNode())) {
+            const t = (node.textContent || "").trim();
+            if (t.length > 5 && t.length < 80 &&
+                (t.match(/\d+\s*(noon|midnight|am|pm)/i) || t.match(/opens?|closes?/i)) &&
+                !t.includes("<") && !t.includes("{")) {
+              hours = t;
+              break;
+            }
+          }
+        }
+
+        // Rating
+        const rating = text('span[class*="sc-1q7bklc"] span') ||
+          text('[class*="rating"]') || "";
+
+        // Address
+        const address =
+          text('[class*="address" i]') ||
+          text('a[href*="/maps"]') ||
+          text('p[class*="sc-"]') || "";
+
+        // Phone
+        const phone = text('[href^="tel:"]') ||
+          text('[class*="phone" i]') || "";
+
+        // Full body text snippet (to extract hours from Zomato's dense text blocks)
+        const bodySnippet = Array.from(document.querySelectorAll("section, article, [class*='restInfo'], [class*='restDetail'], [data-testid]"))
+          .map(el => (el as HTMLElement).innerText?.trim().slice(0, 200))
+          .filter(t => t && t.length > 10)
+          .slice(0, 5)
+          .join("\n");
+
+        return { name, hours, rating, address, phone, bodySnippet };
+      }),
+      new Promise<any>((r) => setTimeout(() => r(null), 3000)),
+    ]);
+
+    if (!info) return null;
+
+    const parts: string[] = [];
+    if (info.name)    parts.push(`📍 ${info.name}`);
+    if (info.hours)   parts.push(`⏰ Hours: ${info.hours}`);
+    if (info.address) parts.push(`📫 Address: ${info.address}`);
+    if (info.phone)   parts.push(`📞 Phone: ${info.phone}`);
+    if (info.rating)  parts.push(`⭐ Rating: ${info.rating}`);
+    // Include body snippet for LLM to extract hours if structured fields missed it
+    if (info.bodySnippet && !info.hours) {
+      parts.push(`📄 Page content:\n${info.bodySnippet}`);
+    }
+
+    return parts.length > 1 ? parts.join("\n") : (info.bodySnippet || null);
+  } catch {
+    return null;
+  }
+}

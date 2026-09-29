@@ -306,12 +306,15 @@ export function findBestTrace(
  * are assumed to be the new entity/creator. We map them over the trace's old
  * entity/creator strings positionally.
  *
- * Example:
- *   Trace tokens:    ["anti", "hero", "taylor", "swift"]
- *   Incoming tokens: ["crown", "txt"]
- *   → newTokens = ["crown", "txt"]
- *   → entity sub: "anti hero" → "crown"   (takes first N new tokens)
- *   → creator sub: "taylor swift" → "txt" (takes next M new tokens)
+ * For the creator, we take ALL remaining new tokens (not just creatorLen) to
+ * handle cases where the creator name has more words than the stored trace's
+ * creator (e.g. trace stored "txt" → 1 token, incoming "honey singh" → 2 tokens).
+ *
+ * Example (fixed):
+ *   Trace: entity="crown" (1 tok), creator="txt" (1 tok)
+ *   Incoming: ["milliner", "honey", "singh"]
+ *   → entity sub: "crown" → "milliner"
+ *   → creator sub: "txt" → "honey singh"  ← ALL remaining tokens
  */
 function computeSubstitutions(
   trace: ExecutionTrace,
@@ -327,6 +330,7 @@ function computeSubstitutions(
   let cursor = 0;
 
   if (trace.entity) {
+    // For entity: use same number of tokens as stored entity
     const entityLen = tokenise(trace.entity).length;
     const replacement = newTokens.slice(cursor, cursor + entityLen).join(" ");
     if (replacement) {
@@ -336,8 +340,9 @@ function computeSubstitutions(
   }
 
   if (trace.creator && cursor < newTokens.length) {
-    const creatorLen = tokenise(trace.creator).length;
-    const replacement = newTokens.slice(cursor, cursor + creatorLen).join(" ");
+    // For creator: take ALL remaining new tokens — handles multi-word creators
+    // (e.g. "txt" → "honey singh" even though "txt" was only 1 token)
+    const replacement = newTokens.slice(cursor).join(" ");
     if (replacement) {
       subs[trace.creator.toLowerCase()] = replacement;
     }

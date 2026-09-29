@@ -15,6 +15,7 @@ import {
   getConversationContext,
   sessionMetrics,
   resetSessionMetrics,
+  softResetSession,
   resetSession,
   logSessionMetrics,
   validateAndResolveAttachments,
@@ -28,6 +29,7 @@ import {
   buildPlannerSnapshot,
   distillGoogleSearch,
   extractGoogleMapsInfo,
+  extractZomatoInfo,
 } from "./distill.js";
 import { tryHeuristic, resetAdSkipState } from "./heuristics.js";
 import { compileGoal, type ExecutionPlan } from "./compiler.js";
@@ -94,8 +96,7 @@ Available actions:
 
 /** Extract and return the raw text. */
 export async function extractText(sh: Stagehand, instruction: string, page: any): Promise<string> {
-  // 0. Google Maps fast-path — Maps is a pure-JS SPA, DOM text distillation returns empty.
-  //    Use the dedicated Maps DOM scraper instead.
+  // 0. Structured fast-paths for pure-JS SPAs that text distillation can't scrape.
   try {
     const url = await page.url().catch(() => "");
     if (url.includes("google.com/maps")) {
@@ -103,6 +104,13 @@ export async function extractText(sh: Stagehand, instruction: string, page: any)
       if (mapsData && mapsData.length > 30) {
         console.log(`   🗺️  Google Maps structured extract (${mapsData.split("\n").length} fields)`);
         return mapsData;
+      }
+    }
+    if (url.includes("zomato.com")) {
+      const zomatoData = await extractZomatoInfo(page);
+      if (zomatoData && zomatoData.length > 20) {
+        console.log(`   🍽️  Zomato structured extract (${zomatoData.split("\n").length} fields)`);
+        return zomatoData;
       }
     }
   } catch { /* fall through */ }
@@ -412,7 +420,7 @@ export async function runAgent(
   }
   goal = attachCheck.resolvedInput;
 
-  resetSession();        // clear prior task context so it doesn't bleed into this run
+  softResetSession();   // carry last extraction/answer for follow-ups; wipe history+metrics
   resetAdSkipState();
 
   // Collect steps for trace recording at end of run
@@ -1034,14 +1042,24 @@ Return ONLY valid JSON action: {"action":"...","instruction":"..."|"url":"..."|"
           continue;
         }
 
-        // Step B: Check for navigation/career links on the page to click or navigate to
+        // Step B: Check for navigation links on the page — but only in main content area,
+        // not in footer/nav/sidebar (which have unrelated links like /careers, /about, etc.)
         const nextLink = await page.evaluate(() => {
-          const links = Array.from(document.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+          // Scope to main content area only — exclude header, footer, nav, sidebar
+          const mainArea =
+            document.querySelector("main, #content, [role=\"main\"], article, .content, #main") ||
+            document.body;
+          const links = Array.from(mainArea.querySelectorAll("a[href]")) as HTMLAnchorElement[];
           for (const l of links) {
+            // Skip footer/nav/sidebar links even if they sneak in
+            const inChrome = l.closest("footer, header, nav, aside, [role=\"navigation\"], [class*=\"footer\" i], [class*=\"sidebar\" i]");
+            if (inChrome) continue;
             const href = l.href;
             const text = (l.innerText || "").toLowerCase();
+            // Only follow destination-relevant links, not site-structure links
             if (
-              (href.includes("/jobs") || href.includes("/careers") || href.includes("/openings")) &&
+              (href.includes("/jobs") || href.includes("/openings")) &&
+              !href.includes("/careers") &&  // skip /careers pages (company hiring page)
               !href.includes("#") &&
               href !== window.location.href
             ) {

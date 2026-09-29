@@ -22,9 +22,45 @@ export function resetSessionMetrics(): void {
 }
 
 /**
- * Clear all session state for a fresh task.
- * Call this at the start of each new agent goal so prior context
- * does not bleed into the next task.
+ * Soft-reset session for a new task.
+ *
+ * HARD reset (full clear): use resetSession().
+ * SOFT reset: preserves the last extraction and answer from the previous task
+ * so immediate follow-up questions can reference them without re-navigating.
+ *
+ * Example: user asks "banh house hours?" → agent extracts hours → user asks
+ * "can I visit at 4:30?" → soft reset keeps hours in context → LLM answers directly.
+ *
+ * Rule: carry forward ONLY the single most recent pinned extraction + answer.
+ * Everything else (history, metrics, old conversation) is cleared.
+ */
+export function softResetSession(): void {
+  // Keep the last pinned extraction entry and last answer — discard everything else
+  const lastExtraction = session.conversation.findLast(
+    (e) => e.label === "extraction" && e.pinned
+  );
+  const lastAnswer = session.conversation.findLast(
+    (e) => e.label === "answer"
+  );
+
+  session.lastExtraction = lastExtraction?.content.split("\n").slice(1).join("\n") ?? "";
+  session.lastAnswer = "";  // answer is in conversation, not needed separately
+  session.batchResults = [];
+  session.history = [];
+
+  // Rebuild conversation with only the carried-forward entries
+  const carried: ConversationEntry[] = [];
+  if (lastExtraction) carried.push({ ...lastExtraction, pinned: true });
+  if (lastAnswer)     carried.push({ ...lastAnswer,     pinned: false });
+  session.conversation = carried;
+
+  // Keep attachedFiles
+  resetSessionMetrics();
+}
+
+/**
+ * Full clear — wipes everything including carried context.
+ * Use for truly unrelated tasks or explicit /reset commands.
  */
 export function resetSession(): void {
   session.lastExtraction = "";
