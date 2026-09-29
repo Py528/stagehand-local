@@ -46,6 +46,13 @@ import {
   REPLAY_THRESHOLD_STRUCTURAL,
   type TraceStep,
 } from "./trace.js";
+import {
+  extractPattern,
+  findPattern,
+  recordPattern,
+  markPatternSuccess,
+  markPatternFail,
+} from "./patterns.js";
 
 export const PLANNER_PROMPT = `You are an autonomous web agent planner controlling a real browser.
 Given the user goal, the current page state, action history, and session context, decide ONE next action.
@@ -427,6 +434,12 @@ export async function runAgent(
   const runStartMs = Date.now();
   const currentRunSteps: TraceStep[] = [];
 
+  // Capture the abstract pattern at t=0 (before any navigation)
+  // so we can record it after a successful run
+  let abstractGoalForRecording = (() => {
+    try { return extractPattern(goal); } catch { return null; }
+  })();
+
   // ─── TIER 0: Compile Goal Contract at t=0 (<300ms) ───
   let compiledPlan: ExecutionPlan | null = null;
   try {
@@ -464,6 +477,111 @@ export async function runAgent(
       await guardPage.goto("about:blank").catch(() => {});
     }
   } catch {}
+
+  // ─── TIER 0.4: Pattern-Based Replay (<5ms, 0 tokens) ───
+  // Match the goal against stored abstract patterns (structural templates with named slots).
+  // This is fundamentally different from keyword-based trace matching:
+  // "play millionaire by honey singh on youtube" matches the pattern
+  // "youtube::media_play::SONG+ARTIST" regardless of what the song/artist is.
+  // The pattern key IS the structure — exact match means instant replay at full confidence.
+  let patternMatchUsed: string | null = null;
+  try {
+    const patternMatch = findPattern(goal);
+    if (patternMatch) {
+      const { template, confidence, slots, replaySteps } = patternMatch;
+      console.log(`\n   🧩 Pattern Match! "${template.patternKey}" (confidence=${confidence.toFixed(2)}, successCount=${template.successCount})`);
+      console.log(`   📐 Slots: ${JSON.stringify(slots)}`);
+      console.log(`   📖 Replaying ${replaySteps.length}-step template (${template.avgMs}ms avg)`);
+
+      const replayPage = await activePage(sh, initialPage);
+      let replaySuccess = false;
+      let replayAnswer: string | undefined;
+
+      for (let rIdx = 0; rIdx < replaySteps.length; rIdx++) {
+        const rStep = replaySteps[rIdx];
+        if (!rStep) continue;
+        const rUrl   = await replayPage.url().catch(() => "about:blank");
+        const rTitle = await replayPage.title().catch(() => "");
+        const stepMs = Date.now();
+
+        try {
+          if (rStep.action === "navigate" && rStep.targetUrl) {
+            console.log(`   [P${rIdx + 1}] 🌐 ${rStep.targetUrl}`);
+            await navigate(replayPage, rStep.targetUrl);
+            await dismissCookies(sh, replayPage);
+            currentRunSteps.push({ action: "navigate", url: rUrl, targetUrl: rStep.targetUrl, elapsedMs: Date.now() - stepMs });
+            if (onStep) onStep({ step: rIdx + 1, maxSteps: replaySteps.length, title: rTitle, url: rUrl, plan: { action: "navigate", url: rStep.targetUrl } });
+
+          } else if (rStep.action === "act" && rStep.instruction) {
+            console.log(`   [P${rIdx + 1}] ⚡ "${rStep.instruction}"`);
+            const r = await retry(() => sh.act(rStep.instruction!, { page: replayPage }), "PatternAct");
+            console.log(`   ✅ ${r.data?.message || "Done"}`);
+            await replayPage.waitForLoadState("domcontentloaded").catch(() => {});
+            await sleep(cfg.agent.postActionMs);
+            currentRunSteps.push({ action: "act", url: rUrl, instruction: rStep.instruction, elapsedMs: Date.now() - stepMs });
+            if (onStep) onStep({ step: rIdx + 1, maxSteps: replaySteps.length, title: rTitle, url: rUrl, plan: { action: "act", instruction: rStep.instruction } });
+
+          } else if (rStep.action === "extract") {
+            const instr = rStep.extractInstruction || "extract main content";
+            const text  = await extractText(sh, instr, replayPage);
+            if (isExtractionValid(text)) {
+              pinLatestExtraction(text, rUrl);
+              const finalUrl = await replayPage.url().catch(() => rUrl);
+              const syn = await synthesize(goal, text, finalUrl, true);
+              if (syn?.answer && syn.isComplete) {
+                replayAnswer = syn.answer;
+                replaySuccess = true;
+                currentRunSteps.push({ action: "extract", url: rUrl, extractInstruction: instr, extractSnippet: text.slice(0, 300), elapsedMs: Date.now() - stepMs });
+                if (onStep) {
+                  const sc = await captureScreenshotBase64(replayPage);
+                  onStep({ step: rIdx + 1, maxSteps: replaySteps.length, title: rTitle, url: finalUrl, plan: { action: "done", message: replayAnswer }, result: replayAnswer, screenshot: sc });
+                }
+                break;
+              }
+            }
+          } else if (rStep.action === "heuristic") {
+            // Let the heuristic system handle this on the next loop iteration
+            replaySuccess = false;
+            break;
+          }
+        } catch (stepErr: any) {
+          console.warn(`   ⚠️ Pattern step ${rIdx + 1} failed: ${stepErr?.message}. Falling back.`);
+          replaySuccess = false;
+          break;
+        }
+      }
+
+      // If all steps completed without an extract, check current page for answer
+      if (!replaySuccess && !replayAnswer && replaySteps[replaySteps.length - 1]?.action !== "extract") {
+        // Non-extract final step (e.g. navigation + act → just check the page)
+        const finalUrl   = await replayPage.url().catch(() => "about:blank");
+        const finalTitle = await replayPage.title().catch(() => "");
+        if (finalUrl !== "about:blank" && finalUrl !== (await activePage(sh, initialPage)).url().catch(() => "")) {
+          replayAnswer = `Completed: ${finalTitle || finalUrl}`;
+          replaySuccess = true;
+        }
+      }
+
+      if (replaySuccess && replayAnswer) {
+        markPatternSuccess(template.patternKey);
+        patternMatchUsed = template.patternKey;
+        session.lastAnswer = replayAnswer;
+        console.log(`\n📢 Answer (pattern replay):\n${replayAnswer}\n`);
+        addToConversation({ role: "assistant", content: replayAnswer, label: "answer" });
+        session.history.push({ ts: ts(), url: await (await activePage(sh, initialPage)).url().catch(() => ""), goal, result: replayAnswer.slice(0, 2000) });
+        console.log(`🎉 Goal completed via Pattern Replay! (${template.patternKey}, ${Date.now() - runStartMs}ms)\n`);
+        sessionMetrics.tier0 += 2;
+        sessionMetrics.tokensSaved += 2000;
+        logSessionMetrics();
+        return replayAnswer;
+      } else {
+        markPatternFail(template.patternKey);
+        console.log(`   ⚠️ Pattern replay failed — falling back to trace/agent pipeline.\n`);
+      }
+    }
+  } catch {
+    // Non-fatal — continue
+  }
 
   // ─── TIER 0.5: Trace Memory Replay (<50ms, ~0 tokens) ───
   // Check if we have a stored execution trace for a similar goal that can be replayed
@@ -659,6 +777,18 @@ export async function runAgent(
             if (compiledPlan?.creatorOrOrg) traceParams.creator = compiledPlan.creatorOrOrg;
             recordTrace(traceParams);
             console.log(`   💾 Trace recorded.`);
+            // ── Also record abstract pattern ──
+            try {
+              if (abstractGoalForRecording) {
+                recordPattern({
+                  abstractGoal: abstractGoalForRecording,
+                  steps: currentRunSteps,
+                  totalMs: Date.now() - runStartMs,
+                  answerSnippet: heuristic.doneMessage.slice(0, 500),
+                });
+                console.log(`   🧩 Pattern recorded: "${abstractGoalForRecording.patternKey}"`);
+              }
+            } catch {}
           } catch {}
           // Auto-learn from this page
           const capturedUrls = Array.from(
@@ -1138,6 +1268,18 @@ Return ONLY valid JSON action: {"action":"...","instruction":"..."|"url":"..."|"
             if (compiledPlan?.creatorOrOrg) tp.creator = compiledPlan.creatorOrOrg;
             recordTrace(tp);
             console.log(`   💾 Trace recorded (${currentRunSteps.length} steps).`);
+            // ── Also record abstract pattern for structural replay ──
+            try {
+              if (abstractGoalForRecording && answer) {
+                recordPattern({
+                  abstractGoal: abstractGoalForRecording,
+                  steps: currentRunSteps,
+                  totalMs: Date.now() - runStartMs,
+                  answerSnippet: answer.slice(0, 500),
+                });
+                console.log(`   🧩 Pattern recorded: "${abstractGoalForRecording.patternKey}"`);
+              }
+            } catch {}
           } catch {}
           if (onStep) {
             const screenshot = await captureScreenshotBase64(page);

@@ -30,6 +30,7 @@ import { getWorkspaceFiles, matchFiles, openInEditor } from "./files.js";
 import { retry, sleep, ts } from "./utils.js";
 import { listTraces, getTraceStats } from "./trace.js";
 import { resetSession } from "./conversation.js";
+import { listPatterns, getPatternStats } from "./patterns.js";
 
 export function cliCompleter(line: string): [string[], string] {
   // @file autocompletion anywhere in prompt
@@ -373,6 +374,28 @@ export async function runCommand(raw: string, sh: Stagehand, page: any): Promise
   if (/^config$/i.test(line)) {
     console.log(`\n⚙️  Config (${CONFIG_PATH}):`);
     console.log(JSON.stringify(cfg, null, 2), "\n");
+    return true;
+  }
+
+  // ── patterns ──
+  if (/^patterns?$/i.test(line)) {
+    const stats = getPatternStats();
+    if (stats.total === 0) {
+      console.log("\n🧩 No patterns learned yet. Complete a few tasks and they'll be stored automatically.\n");
+      return true;
+    }
+    const byService = Object.entries(stats.byService).map(([k, v]) => `${k}: ${v}`).join(", ");
+    console.log(`\n🧩 Pattern Library (${stats.total} patterns, ${stats.totalReplays} total replays)`);
+    console.log(`   Services: ${byService}\n`);
+    const all = listPatterns().slice(0, 10);
+    for (const p of all) {
+      const rel = p.failCount > 0 ? ` / ❌ ${p.failCount} fails` : "";
+      const slots = p.slotNames.join(", ");
+      console.log(`  📐 [${p.patternKey}]`);
+      console.log(`     Slots: ${slots} | ✅ ${p.successCount} replays${rel} | ~${p.avgMs}ms`);
+      console.log(`     Example: "${p.exampleGoals[0] ?? "—"}"`);
+    }
+    console.log();
     return true;
   }
 
