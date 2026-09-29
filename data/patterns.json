@@ -1,1 +1,35 @@
-{}
+{
+  "youtube::media_play::SONG": {
+    "patternKey": "youtube::media_play::SONG",
+    "slotNames": [
+      "SONG"
+    ],
+    "templateSteps": [
+      {
+        "action": "act",
+        "url": "about:blank",
+        "elapsedMs": 5808,
+        "instruction": "click the link 'tv off (투모로우바이투게더) '어느날 머리에서 뿔이 자랐다 (turn)' Official MV'"
+      },
+      {
+        "action": "act",
+        "url": "https://www.youtube.com/results?search_query=turn+tv+off%2C",
+        "instruction": "click the link 'Kendrick Lamar - tv off (Official Audio)'"
+      },
+      {
+        "action": "heuristic",
+        "url": "https://www.youtube.com/watch?v=U8F5G5wR1mk&list=RDU8F5G5wR1mk&start_radio=1",
+        "instruction": "⚡ Heuristic: Verified playback of \"Kendrick Lamar - tv off (Official Audio)\""
+      }
+    ],
+    "exampleGoals": [
+      "play turn tv off, on YouTube"
+    ],
+    "successCount": 1,
+    "failCount": 0,
+    "avgSteps": 3,
+    "avgMs": 48608,
+    "createdAt": "2026-09-29T10:16:17.017Z",
+    "lastUsed": "2026-09-29T10:16:17.017Z"
+  }
+}
