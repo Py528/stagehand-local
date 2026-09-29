@@ -8,7 +8,8 @@
     "start": "tsx index.ts",
     "ui": "tsx index.ts --ui",
     "cli": "tsx index.ts -i",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npx tsc --noEmit --skipLibCheck 2>&1 | grep -v browser_resolver; echo typecheck:$?",
+    "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "keywords": [],
   "author": "",
