@@ -423,6 +423,26 @@ export async function runAgent(
     // Non-fatal fallback
   }
 
+  // ── New-task page guard: if the compiled service doesn't match the current page domain,
+  // navigate away so stale page heuristics can't fire on unrelated goals.
+  // E.g. "is banh house open?" on a leftover YouTube watch page would trigger the
+  // YouTube "verified playback" heuristic (since 'open' was matching as a media verb).
+  // Now fixed in the heuristic too, but defense-in-depth: clear the page proactively.
+  try {
+    const guardPage = await activePage(sh, initialPage);
+    const guardUrl = await guardPage.url().catch(() => "");
+    const service = compiledPlan?.service ?? "generic";
+    const isYoutubePage = guardUrl.includes("youtube.com");
+    const isGooglePage  = guardUrl.includes("google.com/search");
+    const needsClearPage =
+      (isYoutubePage && service !== "youtube") ||
+      (isGooglePage  && service !== "google" && service !== "generic");
+    if (needsClearPage && guardUrl !== "about:blank") {
+      console.log(`   🔄 New task: clearing stale ${normalizeDomain(guardUrl)} page before planning...`);
+      await guardPage.goto("about:blank").catch(() => {});
+    }
+  } catch {}
+
   // ─── TIER 0.5: Trace Memory Replay (<50ms, ~0 tokens) ───
   // Check if we have a stored execution trace for a similar goal that can be replayed
   try {
@@ -580,6 +600,25 @@ export async function runAgent(
           console.log(`\n🎉 ${heuristic.doneMessage}\n`);
           logSessionMetrics();
           // ── Auto-record trace for heuristic fast-paths ──
+          // Guard: only record if the heuristic answer is actually relevant to the goal.
+          // A heuristic firing on a leftover page (e.g. YouTube heuristic on a YouTube page
+          // when the goal was about a restaurant) produces a wrong answer — don't save that.
+          const heuristicRelevant = (() => {
+            const gLower = goal.toLowerCase();
+            const dLower = heuristic.doneMessage.toLowerCase();
+            // YouTube heuristics: only relevant if goal is a media/play request
+            if (url.includes("youtube.com/watch")) {
+              return /\b(play|watch|listen|video|song|music|youtube)\b/i.test(gLower);
+            }
+            // Generic: check the domain of the current URL appears related to the goal
+            const domain = normalizeDomain(url);
+            return domain === "about:blank" || gLower.includes(domain.split(".")[0] ?? "");
+          })();
+
+          if (!heuristicRelevant) {
+            console.log(`   ⚠️ Heuristic answer is from a different page context — not recording trace, continuing to plan.`);
+            // Don't treat this as complete — fall through to LLM planner
+          } else {
           try {
             currentRunSteps.push({ action: "heuristic", url, instruction: heuristic.description });
             const traceParams: import("./trace.js").TraceRecordingParams = {
@@ -606,6 +645,7 @@ export async function runAgent(
           await autoLearnFromPage(page, url, capturedUrls);
           playbooks.recordSuccess(normalizeDomain(url));
           return heuristic.doneMessage;
+          } // end heuristicRelevant else block
         }
         if (heuristic.continueLoop) continue;
       }

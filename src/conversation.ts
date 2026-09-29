@@ -91,17 +91,35 @@ export function addToConversation(entry: ConversationEntry): void {
   }
 }
 
-/** Pin the latest extraction, unpinning older extractions so only the most recent remains pinned. */
+/** Pin the latest extraction, unpinning older extractions so only the most recent remains pinned.
+ *  Also deduplicates: if the same URL was already pinned, replace it in-place instead of appending. */
 export function pinLatestExtraction(content: string, sourceUrl: string): void {
+  // Unpin all existing extraction entries
   for (const entry of session.conversation) {
     if (entry.label === "extraction") {
       entry.pinned = false;
     }
   }
   session.lastExtraction = content;
+
+  // Deduplicate: if an extraction from this exact URL already exists, replace it
+  const newContent = `Extracted from ${sourceUrl}:\n${content}`;
+  const existingIdx = session.conversation.findIndex(
+    (e) => e.label === "extraction" && e.content.startsWith(`Extracted from ${sourceUrl}`)
+  );
+  if (existingIdx !== -1) {
+    session.conversation[existingIdx] = {
+      role: "data",
+      content: newContent,
+      label: "extraction",
+      pinned: true,
+    };
+    return;
+  }
+
   addToConversation({
     role: "data",
-    content: `Extracted from ${sourceUrl}:\n${content}`,
+    content: newContent,
     label: "extraction",
     pinned: true,
   });

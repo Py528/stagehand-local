@@ -1,1 +1,35 @@
-{}
+{
+  "generic_general_navigate_uee8am": {
+    "id": "generic_general_navigate_uee8am",
+    "goal": "could you check if banh house is open in law college road Pune?",
+    "goalTokens": [
+      "you",
+      "check",
+      "if",
+      "banh",
+      "house",
+      "law",
+      "college",
+      "road",
+      "pune"
+    ],
+    "service": "generic",
+    "intent": "general_navigate",
+    "answerDomain": "youtube.com",
+    "steps": [
+      {
+        "action": "heuristic",
+        "url": "https://www.youtube.com/watch?v=b1kbLwvqugk&list=RDb1kbLwvqugk&start_radio=1",
+        "instruction": "⚡ Heuristic: Verified playback of \"Taylor Swift - Anti-Hero (Official Music Video)\""
+      }
+    ],
+    "answerSnippet": "Now playing \"Taylor Swift - Anti-Hero (Official Music Video)\" on YouTube.",
+    "recordedAt": "2026-09-29T08:13:56.284Z",
+    "replayCount": 0,
+    "failCount": 1,
+    "totalMs": 6145,
+    "tier0": 1,
+    "tier1": 0,
+    "tier2": 0
+  }
+}

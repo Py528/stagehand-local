@@ -72,9 +72,9 @@
       {
         "urlPattern": "/s/i/youtube_fill_experimental/gaming/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 9,
+        "successCount": 11,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.723Z"
+        "lastVerified": "2026-09-29T08:14:40.582Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/help_circle/v2/24px.svg",
@@ -86,9 +86,9 @@
       {
         "urlPattern": "/s/i/youtube_outline_experimental/gaming/v3/24px.svg",
         "purpose": "page_data",
-        "successCount": 9,
+        "successCount": 11,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.723Z"
+        "lastVerified": "2026-09-29T08:14:40.582Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/copy/v3/24px.svg",
@@ -128,16 +128,16 @@
       {
         "urlPattern": "/s/i/youtube_fill_experimental/search/v15/24px.svg",
         "purpose": "search_results",
-        "successCount": 7,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.725Z"
+        "lastVerified": "2026-09-29T08:14:40.583Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/video_camera_add/v2/24px.svg",
         "purpose": "media_metadata",
-        "successCount": 9,
+        "successCount": 11,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.725Z"
+        "lastVerified": "2026-09-29T08:14:40.583Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/live/v3/24px.svg",
@@ -149,16 +149,16 @@
       {
         "urlPattern": "/s/i/youtube_outline_experimental/volume_mute/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 9,
+        "successCount": 11,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.727Z"
+        "lastVerified": "2026-09-29T08:14:40.583Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/volume_mute/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 9,
+        "successCount": 11,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.726Z"
+        "lastVerified": "2026-09-29T08:14:40.583Z"
       },
       {
         "urlPattern": "/youtubei/v1/player",
@@ -184,32 +184,74 @@
       {
         "urlPattern": "/s/i/youtube_fill_experimental/volume_max/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 7,
+        "successCount": 9,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.727Z"
+        "lastVerified": "2026-09-29T08:14:40.583Z"
       },
       {
         "urlPattern": "/s/i/youtube_outline_experimental/volume_max/v2/24px.svg",
         "purpose": "page_data",
-        "successCount": 8,
+        "successCount": 10,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:37:38.726Z"
+        "lastVerified": "2026-09-29T08:14:40.583Z"
       },
       {
         "urlPattern": "/s/i/youtube_fill_experimental/video/v3/24px.svg",
         "purpose": "media_metadata",
-        "successCount": 1,
+        "successCount": 3,
         "failureCount": 0,
-        "lastVerified": "2026-09-26T12:36:19.785Z"
+        "lastVerified": "2026-09-29T08:14:40.583Z"
+      },
+      {
+        "urlPattern": "/s/i/youtube_outline_experimental/arrow_down/v3/24px.svg",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-29T08:14:40.583Z"
+      },
+      {
+        "urlPattern": "/s/i/youtube_fill_experimental/trophy/v3/24px.svg",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-29T08:14:40.583Z"
+      },
+      {
+        "urlPattern": "/s/i/youtube_outline_experimental/trophy/v3/24px.svg",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-29T08:14:40.583Z"
+      },
+      {
+        "urlPattern": "/s/i/youtube_outline_experimental/trending/v2/24px.svg",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-29T08:14:40.583Z"
+      },
+      {
+        "urlPattern": "/s/i/youtube_fill_experimental/trending/v2/24px.svg",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-29T08:14:40.583Z"
+      },
+      {
+        "urlPattern": "/youtube/img/icons/web/youtube_fill/unplugged_logo/v2/24px.svg",
+        "purpose": "page_data",
+        "successCount": 2,
+        "failureCount": 0,
+        "lastVerified": "2026-09-29T08:14:40.583Z"
       }
     ],
     "selectors": [],
     "meta": {
       "firstSeen": "2026-09-26T11:00:14.790Z",
-      "lastSeen": "2026-09-26T12:37:38.721Z",
-      "visitCount": 14,
-      "successRate": 0.7857142857142857,
-      "successCount": 11
+      "lastSeen": "2026-09-29T08:14:40.582Z",
+      "visitCount": 16,
+      "successRate": 0.8125,
+      "successCount": 13
     },
     "archetypeId": "archetype_youtube_spa"
   },

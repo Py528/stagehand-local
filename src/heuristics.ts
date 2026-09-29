@@ -750,11 +750,16 @@ async function tryYouTubeWatchPageCheck(
   if (!url.includes("youtube.com/watch")) return null;
 
   const lower = goal.toLowerCase();
+  // isPlayRequest: 'open' must be a media-open verb (e.g. 'open this video'), NOT 'is open' (restaurant hours)
+  // Match 'open' only when followed by a media-type word or when it starts the goal (verb position)
+  const hasMediaOpenVerb = /open\s+(?:this\s+)?(?:video|song|track|music|the\s+video|youtube)/i.test(goal) ||
+    /^(?:open|play|watch|listen)/i.test(goal.trim());
   const isPlayRequest =
-    lower.includes("play") ||
-    lower.includes("watch") ||
+    lower.includes("play ") ||
+    lower.includes(" play") ||
+    lower.includes("watch ") ||
     lower.includes("listen") ||
-    lower.includes("open") ||
+    hasMediaOpenVerb ||
     plan?.intent === "media_play";
 
   if (!isPlayRequest) return null;
