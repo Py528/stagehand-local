@@ -41,6 +41,18 @@ export const DEFAULT_CONFIG: Config = {
     headless: false,
     defaultTimeout: 30000,
     useOwnBrowser: false,
+    keepBrowserOpen: true,
+    disableSecurity: false,
+    windowWidth: 1280,
+    windowHeight: 1100,
+    browserBinaryPath: undefined,
+    browserUserDataDir: undefined,
+    cdpUrl: undefined,
+    wssUrl: undefined,
+    recordingPath: "./tmp/record_videos",
+    tracePath: "./tmp/traces",
+    agentHistoryPath: "./tmp/agent_history",
+    downloadPath: "./tmp/downloads",
   },
   agent: {
     maxSteps: 10,
@@ -119,6 +131,16 @@ if (hasCliFlag(["--headless"])) cfg.browser.headless = true;
 if (hasCliFlag(["--headed", "--no-headless"])) cfg.browser.headless = false;
 if (hasCliFlag(["--use-own-browser", "--my-browser", "--own-browser"])) cfg.browser.useOwnBrowser = true;
 if (process.env.USE_OWN_BROWSER) cfg.browser.useOwnBrowser = ["true", "1", "yes"].includes(process.env.USE_OWN_BROWSER.toLowerCase());
+if (hasCliFlag(["--keep-browser-open"])) cfg.browser.keepBrowserOpen = true;
+if (process.env.KEEP_BROWSER_OPEN) cfg.browser.keepBrowserOpen = ["true", "1", "yes"].includes(process.env.KEEP_BROWSER_OPEN.toLowerCase());
+if (hasCliFlag(["--disable-security"])) cfg.browser.disableSecurity = true;
+if (process.env.DISABLE_SECURITY) cfg.browser.disableSecurity = ["true", "1", "yes"].includes(process.env.DISABLE_SECURITY.toLowerCase());
 if (process.env.BROWSER_PATH) cfg.browser.browserBinaryPath = process.env.BROWSER_PATH;
 if (process.env.BROWSER_USER_DATA) cfg.browser.browserUserDataDir = process.env.BROWSER_USER_DATA;
+const cdpCli = getCliOption(["--cdp", "--cdp-url"]);
+if (cdpCli) cfg.browser.cdpUrl = cdpCli;
+if (process.env.BROWSER_CDP) cfg.browser.cdpUrl = process.env.BROWSER_CDP;
+const wssCli = getCliOption(["--wss", "--wss-url"]);
+if (wssCli) cfg.browser.wssUrl = wssCli;
+if (process.env.BROWSER_WSS) cfg.browser.wssUrl = process.env.BROWSER_WSS;
 if (process.env.MAX_STEPS) cfg.agent.maxSteps = parseInt(process.env.MAX_STEPS, 10);

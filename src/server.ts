@@ -8,9 +8,10 @@ import {
   validateAndResolveAttachments,
   isConversational,
   handleConversational,
+  resetSession,
 } from "./conversation.js";
 import { localClient } from "./llm.js";
-import { activePage, captureScreenshotBase64 } from "./browser.js";
+import { activePage, captureScreenshotBase64, isDashboardUrl } from "./browser.js";
 import { runAgent, fastUrlQuestion } from "./planner.js";
 import { runScan } from "./scan.js";
 import { ts } from "./utils.js";
@@ -20,7 +21,13 @@ import {
   getActiveSessionState,
   type BrowserMode,
 } from "./browser_manager.js";
-import { detectDefaultBrowser, isCdpActive } from "./browser_resolver.js";
+import {
+  detectDefaultBrowser,
+  detectAllInstalledBrowsers,
+  isCdpActive,
+  runBrowserPrecheck,
+  launchBrowserWithDebugPort,
+} from "./browser_resolver.js";
 
 export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Server {
   const sseClients = new Set<http.ServerResponse>();
@@ -69,6 +76,7 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
     // API: Browser Status & System Detection
     if (url.pathname === "/api/browser/status" && req.method === "GET") {
       const detected = detectDefaultBrowser();
+      const installed = detectAllInstalledBrowsers();
       const cdpRunning = await isCdpActive("127.0.0.1", 9222);
       const mode = getCurrentBrowserMode();
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -76,10 +84,69 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
         JSON.stringify({
           mode,
           detected,
+          installed,
           cdpRunning,
-          browserName: getActiveSessionState()?.browserName || (mode === "own" ? detected?.name || "Desktop Browser" : "Playwright Chromium"),
+          config: cfg.browser,
+          browserName:
+            getActiveSessionState()?.browserName ||
+            (mode === "own" ? detected?.name || "Desktop Browser" : "Playwright Chromium"),
         })
       );
+      return;
+    }
+
+    // API: Comprehensive Browser Pre-Check & Diagnostics
+    if (url.pathname === "/api/browser/precheck" && req.method === "GET") {
+      try {
+        const diagnostics = await runBrowserPrecheck(cfg.browser);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(diagnostics));
+      } catch (e: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: e?.message || String(e) }));
+      }
+      return;
+    }
+
+    // API: Launch / Attach Arc on Debugging Port 9222
+    if (url.pathname === "/api/browser/launch-debug" && req.method === "POST") {
+      try {
+        const launchRes = await launchBrowserWithDebugPort(cfg.browser.browserBinaryPath, 9222);
+        if (launchRes.success) {
+          cfg.browser.cdpUrl = launchRes.cdpUrl || "http://127.0.0.1:9222";
+          cfg.browser.useOwnBrowser = true;
+          saveConfig({ browser: cfg.browser });
+          broadcast("browser_switching", { mode: "own", ts: ts() });
+          const newSession = await getOrSwitchBrowser("own", { forceRestart: true });
+          currentSh = newSession.sh;
+          currentPage = newSession.page;
+        }
+        res.writeHead(launchRes.success ? 200 : 500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(launchRes));
+      } catch (e: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: e?.message || String(e) }));
+      }
+      return;
+    }
+
+    // API: Save Browser Configuration
+    if (url.pathname === "/api/browser/settings" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const newBrowser = JSON.parse(body || "{}");
+          const mergedBrowser = { ...cfg.browser, ...newBrowser };
+          saveConfig({ browser: mergedBrowser });
+          cfg.browser = mergedBrowser;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "ok", config: cfg.browser }));
+        } catch (e: any) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
       return;
     }
 
@@ -271,7 +338,7 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
       return;
     }
 
-    // API: Save config
+    // API: Save LLM & Agent config
     if (url.pathname === "/api/config" && req.method === "POST") {
       let body = "";
       req.on("data", (chunk) => (body += chunk));
@@ -286,6 +353,15 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
           res.end(JSON.stringify({ error: e.message }));
         }
       });
+      return;
+    }
+
+    // API: Clear session memory (conversation, history, extraction)
+    if (url.pathname === "/api/clear" && req.method === "POST") {
+      resetSession();
+      broadcast("session_cleared", { ts: new Date().toISOString() });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "cleared", message: "Session memory cleared. Attached files kept." }));
       return;
     }
 
@@ -413,18 +489,19 @@ function getWebUiHtml(): string {
     }
     .tabs {
       display: flex;
-      gap: 0.5rem;
+      gap: 0.4rem;
       border-bottom: 1px solid var(--card-border);
       padding-bottom: 0.5rem;
+      flex-wrap: wrap;
     }
     .tab-btn {
       background: transparent;
       border: none;
       color: var(--text-muted);
       font-family: inherit;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
       font-weight: 500;
-      padding: 0.5rem 1rem;
+      padding: 0.45rem 0.85rem;
       border-radius: 8px;
       cursor: pointer;
       transition: all 0.2s;
@@ -464,12 +541,17 @@ function getWebUiHtml(): string {
     }
     .detected-browser-pill {
       font-size: 0.72rem;
-      padding: 0.18rem 0.55rem;
+      padding: 0.2rem 0.6rem;
       border-radius: 999px;
       background: rgba(16, 185, 129, 0.15);
       color: #34d399;
       border: 1px solid rgba(16, 185, 129, 0.3);
       font-family: 'JetBrains Mono', monospace;
+    }
+    .detected-browser-pill.warn {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+      border-color: rgba(245, 158, 11, 0.3);
     }
     .radio-card-group {
       display: grid;
@@ -521,10 +603,100 @@ function getWebUiHtml(): string {
       line-height: 1.25;
     }
 
+    /* Browser Info & Diagnostics */
+    .browser-info-card {
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 1rem;
+    }
+    .quick-pick-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text);
+      padding: 0.35rem 0.75rem;
+      border-radius: 8px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .quick-pick-btn:hover {
+      background: rgba(59, 130, 246, 0.2);
+      border-color: #3b82f6;
+    }
+    .toggle-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    @media (max-width: 600px) {
+      .toggle-grid { grid-template-columns: 1fr; }
+    }
+    .checkbox-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.65rem;
+      padding: 0.75rem 0.9rem;
+      border-radius: 10px;
+      border: 1px solid var(--card-border);
+      background: rgba(15, 23, 42, 0.5);
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.2s;
+    }
+    .checkbox-card:hover {
+      background: rgba(59, 130, 246, 0.06);
+      border-color: rgba(59, 130, 246, 0.3);
+    }
+    .checkbox-card input[type="checkbox"] {
+      margin-top: 0.2rem;
+      accent-color: #3b82f6;
+      cursor: pointer;
+    }
+    .chk-title {
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #f3f4f6;
+    }
+    .chk-desc {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      line-height: 1.25;
+    }
+    .field-hint {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-top: 0.2rem;
+    }
+    .precheck-card {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 0.9rem;
+    }
+    .precheck-test-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      font-size: 0.8rem;
+    }
+    .precheck-test-item:last-child { border-bottom: none; }
+    .status-badge {
+      font-size: 0.7rem;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 0.15rem 0.45rem;
+      border-radius: 6px;
+    }
+    .status-badge.pass { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .status-badge.warn { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+    .status-badge.fail { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+
     .input-group {
       display: flex;
       flex-direction: column;
-      gap: 0.4rem;
+      gap: 0.35rem;
     }
     label {
       font-size: 0.85rem;
@@ -679,7 +851,8 @@ function getWebUiHtml(): string {
         <button class="tab-btn active" onclick="switchTab('agent')">🤖 Agent Goal</button>
         <button class="tab-btn" onclick="switchTab('extract')">🔍 Quick Extract</button>
         <button class="tab-btn" onclick="switchTab('scan')">📋 Batch Scan</button>
-        <button class="tab-btn" onclick="switchTab('settings')">⚙️ Settings</button>
+        <button class="tab-btn" onclick="switchTab('browser')">🌐 Browser Settings</button>
+        <button class="tab-btn" onclick="switchTab('settings')">⚙️ Agent Settings</button>
       </div>
 
       <!-- Agent Tab -->
@@ -687,7 +860,7 @@ function getWebUiHtml(): string {
         <!-- Browser Mode Radio Toggle -->
         <div class="browser-mode-card">
           <div class="browser-mode-header">
-            <span class="browser-mode-title">🌐 Browser Environment</span>
+            <span class="browser-mode-title">🌐 Active Browser Mode</span>
             <span id="detected-browser-pill" class="detected-browser-pill">🔍 Detecting...</span>
           </div>
           <div class="radio-card-group">
@@ -702,7 +875,7 @@ function getWebUiHtml(): string {
               <input type="radio" name="browser-mode" id="radio-mode-own" value="own" onchange="selectBrowserMode('own')">
               <div class="radio-card-content">
                 <div class="radio-title">👤 My Default Browser</div>
-                <div class="radio-desc">Uses your desktop browser with all logged-in sessions</div>
+                <div class="radio-desc" id="own-browser-sublabel">Uses Arc with your existing Google logins & saved passwords</div>
               </div>
             </label>
           </div>
@@ -714,6 +887,9 @@ function getWebUiHtml(): string {
         </div>
         <button id="run-btn" class="btn-primary" onclick="runAgentGoal()">
           <span>▶</span> Execute Agent Goal
+        </button>
+        <button id="clear-btn" onclick="clearMemory()" style="background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.3); color:#f87171; padding:0.6rem 1.2rem; border-radius:10px; font-size:0.88rem; font-weight:600; cursor:pointer; display:flex; align-items:center; gap:0.4rem; transition:all 0.2s;" title="Clear session memory so the next task starts fresh">
+          🧹 Clear Memory
         </button>
 
         <label>Live Execution Steps</label>
@@ -764,7 +940,136 @@ function getWebUiHtml(): string {
         </button>
       </div>
 
-      <!-- Settings Tab -->
+      <!-- Browser Settings Tab (Browser-Use Style) -->
+      <div id="tab-browser" class="tab-content">
+        <!-- Top Banner: Detected Browser & Quick Selectors -->
+        <div class="browser-info-card">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+              <h3 id="detected-browser-name" style="font-size:1.05rem; font-weight:600; color:#93c5fd;">🌐 Detected: Arc</h3>
+              <p id="detected-browser-detail" style="font-size:0.8rem; color:var(--text-muted); margin-top:2px;">Primary desktop browser with logins & saved passwords</p>
+            </div>
+            <div id="cdp-status-pill" class="detected-browser-pill">Checking CDP...</div>
+          </div>
+          <div style="margin-top:0.75rem;">
+            <label style="font-size:0.75rem; text-transform:uppercase; letter-spacing:0.04em;">Installed Browsers:</label>
+            <div id="installed-browser-buttons" style="display:flex; gap:0.5rem; margin-top:0.35rem; flex-wrap:wrap;"></div>
+          </div>
+        </div>
+
+        <!-- Primary Inputs: Binary & Profile -->
+        <div class="input-group">
+          <label for="cfg-browser-bin">Browser Binary Path</label>
+          <input type="text" id="cfg-browser-bin" value="${cfg.browser.browserBinaryPath || ''}" placeholder="/Applications/Arc.app/Contents/MacOS/Arc">
+          <span class="field-hint" id="hint-browser-bin">Auto-detected: Arc (/Applications/Arc.app/Contents/MacOS/Arc)</span>
+        </div>
+
+        <div class="input-group">
+          <label for="cfg-browser-data">Browser User Data Dir</label>
+          <input type="text" id="cfg-browser-data" value="${cfg.browser.browserUserDataDir || ''}" placeholder="/Users/pranavshinde/Library/Application Support/Arc/User Data">
+          <span class="field-hint" id="hint-browser-data">Auto-detected profile: ~/Library/Application Support/Arc/User Data (Leave empty to auto-clone session)</span>
+        </div>
+
+        <!-- Checkboxes / Toggles Row -->
+        <div class="toggle-grid">
+          <label class="checkbox-card">
+            <input type="checkbox" id="cfg-use-own" ${cfg.browser.useOwnBrowser ? 'checked' : ''}>
+            <div>
+              <div class="chk-title">Use Own Browser</div>
+              <div class="chk-desc">Use your desktop browser with existing logins & sessions</div>
+            </div>
+          </label>
+          <label class="checkbox-card">
+            <input type="checkbox" id="cfg-keep-open" ${cfg.browser.keepBrowserOpen !== false ? 'checked' : ''}>
+            <div>
+              <div class="chk-title">Keep Browser Open</div>
+              <div class="chk-desc">Keep browser open between tasks</div>
+            </div>
+          </label>
+          <label class="checkbox-card">
+            <input type="checkbox" id="cfg-headless" ${cfg.browser.headless ? 'checked' : ''}>
+            <div>
+              <div class="chk-title">Headless Mode</div>
+              <div class="chk-desc">Run browser without GUI</div>
+            </div>
+          </label>
+          <label class="checkbox-card">
+            <input type="checkbox" id="cfg-disable-sec" ${cfg.browser.disableSecurity ? 'checked' : ''}>
+            <div>
+              <div class="chk-title">Disable Security</div>
+              <div class="chk-desc">Disable web security & CORS checks</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- Dimensions Row -->
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+          <div class="input-group">
+            <label for="cfg-window-w">Window Width</label>
+            <input type="number" id="cfg-window-w" value="${cfg.browser.windowWidth || 1280}" placeholder="1280">
+          </div>
+          <div class="input-group">
+            <label for="cfg-window-h">Window Height</label>
+            <input type="number" id="cfg-window-h" value="${cfg.browser.windowHeight || 1100}" placeholder="1100">
+          </div>
+        </div>
+
+        <!-- Remote Debugging & CDP -->
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+          <div class="input-group">
+            <label for="cfg-cdp-url">CDP URL</label>
+            <input type="text" id="cfg-cdp-url" value="${cfg.browser.cdpUrl || ''}" placeholder="http://127.0.0.1:9222">
+            <span class="field-hint">CDP URL for browser remote debugging</span>
+          </div>
+          <div class="input-group">
+            <label for="cfg-wss-url">WSS URL</label>
+            <input type="text" id="cfg-wss-url" value="${cfg.browser.wssUrl || ''}" placeholder="ws://127.0.0.1:9222/devtools/browser/...">
+            <span class="field-hint">WSS URL for browser remote debugging</span>
+          </div>
+        </div>
+
+        <!-- Pre-Check Diagnostic Box -->
+        <div class="precheck-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+            <span style="font-size:0.9rem; font-weight:600; color:#f3f4f6;">🔍 Browser Pre-Check & Diagnostics</span>
+            <button class="badge" onclick="runPrecheck()" style="cursor:pointer; background:rgba(59,130,246,0.25); border:1px solid rgba(59,130,246,0.4); color:#93c5fd; padding:0.3rem 0.8rem;">
+              ⚡ Run Pre-Check
+            </button>
+          </div>
+          <div id="precheck-results" class="precheck-results" style="font-size:0.8rem; color:var(--text-muted);">
+            Click "Run Pre-Check" to test your browser executable, CDP connection, and password/login storage.
+          </div>
+          <div id="precheck-actions" style="margin-top:0.75rem; display:none; gap:0.5rem; flex-wrap:wrap;">
+            <button id="btn-launch-debug" class="badge" onclick="launchArcDebug()" style="cursor:pointer; background:rgba(16,185,129,0.2); border:1px solid rgba(16,185,129,0.4); color:#34d399; padding:0.35rem 0.85rem;">
+              🚀 Launch / Attach Arc on Port 9222
+            </button>
+          </div>
+        </div>
+
+        <!-- Storage Paths -->
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+          <div class="input-group">
+            <label for="cfg-download-dir">Downloads Directory</label>
+            <input type="text" id="cfg-download-dir" value="${cfg.browser.downloadPath || './tmp/downloads'}" placeholder="./tmp/downloads">
+          </div>
+          <div class="input-group">
+            <label for="cfg-history-dir">Agent History Path</label>
+            <input type="text" id="cfg-history-dir" value="${cfg.browser.agentHistoryPath || './tmp/agent_history'}" placeholder="./tmp/agent_history">
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div style="display:flex; gap:0.75rem; margin-top:0.5rem;">
+          <button class="btn-primary" onclick="saveBrowserSettings()" style="flex:1;">
+            <span>💾</span> Save Browser Settings
+          </button>
+          <button class="btn-primary" onclick="applyAndTestBrowser()" style="background:rgba(59,130,246,0.2); border:1px solid rgba(59,130,246,0.4); color:#93c5fd; box-shadow:none;">
+            <span>🔄</span> Apply & Reconnect
+          </button>
+        </div>
+      </div>
+
+      <!-- Agent Settings Tab -->
       <div id="tab-settings" class="tab-content">
         <div class="input-group">
           <label>LLM Base URL</label>
@@ -774,24 +1079,18 @@ function getWebUiHtml(): string {
           <label>Model ID</label>
           <input type="text" id="cfg-llm-model" value="${cfg.llm.modelId}">
         </div>
-        <div class="input-group">
-          <label>Temperature</label>
-          <input type="number" step="0.05" id="cfg-llm-temp" value="${cfg.llm.temperature}">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+          <div class="input-group">
+            <label>Temperature</label>
+            <input type="number" step="0.05" id="cfg-llm-temp" value="${cfg.llm.temperature}">
+          </div>
+          <div class="input-group">
+            <label>Max Agent Steps</label>
+            <input type="number" id="cfg-agent-steps" value="${cfg.agent.maxSteps}">
+          </div>
         </div>
-        <div class="input-group">
-          <label>Max Agent Steps</label>
-          <input type="number" id="cfg-agent-steps" value="${cfg.agent.maxSteps}">
-        </div>
-        <div class="input-group">
-          <label>Browser Binary Path</label>
-          <input type="text" id="cfg-browser-bin" value="${cfg.browser.browserBinaryPath || ''}" placeholder="Auto-detected default browser">
-        </div>
-        <div class="input-group">
-          <label>Browser User Data Dir</label>
-          <input type="text" id="cfg-browser-data" value="${cfg.browser.browserUserDataDir || ''}" placeholder="Leave empty to auto-clone session state">
-        </div>
-        <button class="btn-primary" onclick="saveSettings()">
-          <span>💾</span> Save Settings
+        <button class="btn-primary" onclick="saveAgentSettings()">
+          <span>💾</span> Save Agent Settings
         </button>
       </div>
     </div>
@@ -849,12 +1148,39 @@ function getWebUiHtml(): string {
         const res = await fetch('/api/browser/status');
         const data = await res.json();
         const pill = document.getElementById('detected-browser-pill');
+        const cdpPill = document.getElementById('cdp-status-pill');
+        const titleEl = document.getElementById('detected-browser-name');
+
         if (data.detected) {
-          pill.innerText = '✨ ' + data.detected.name + ' Detected';
-          pill.title = data.detected.binary;
-        } else {
-          pill.innerText = 'Chromium Ready';
+          titleEl.innerText = '🌐 ' + data.detected.name + (data.detected.isDefault ? ' (Default)' : '');
+          pill.innerText = '✨ ' + data.detected.name + (data.cdpRunning ? ' (CDP Active)' : '');
+          pill.className = data.cdpRunning ? 'detected-browser-pill' : 'detected-browser-pill warn';
         }
+
+        if (cdpPill) {
+          if (data.cdpRunning) {
+            cdpPill.innerText = '🟢 CDP Port 9222 Active';
+            cdpPill.className = 'detected-browser-pill';
+          } else {
+            cdpPill.innerText = '⚪ CDP Inactive';
+            cdpPill.className = 'detected-browser-pill warn';
+          }
+        }
+
+        // Render installed browser buttons
+        const btnContainer = document.getElementById('installed-browser-buttons');
+        if (btnContainer && data.installed) {
+          btnContainer.innerHTML = '';
+          data.installed.forEach(b => {
+            const btn = document.createElement('button');
+            btn.className = 'quick-pick-btn';
+            btn.innerText = b.name + (b.isDefault ? ' ★' : '');
+            btn.title = b.binary;
+            btn.onclick = () => selectInstalledBrowser(b);
+            btnContainer.appendChild(btn);
+          });
+        }
+
         if (data.mode === 'own') {
           selectBrowserMode('own', false);
         } else {
@@ -863,6 +1189,14 @@ function getWebUiHtml(): string {
       } catch (e) {
         console.error('Failed to load browser status', e);
       }
+    }
+
+    function selectInstalledBrowser(b) {
+      document.getElementById('cfg-browser-bin').value = b.binary;
+      document.getElementById('cfg-browser-data').value = b.userDataDir;
+      document.getElementById('hint-browser-bin').innerText = 'Selected: ' + b.name + ' (' + b.binary + ')';
+      document.getElementById('hint-browser-data').innerText = 'Selected profile: ' + b.userDataDir;
+      appendLog('Selected browser: ' + b.name);
     }
 
     async function selectBrowserMode(mode, triggerSwitch = true) {
@@ -887,7 +1221,7 @@ function getWebUiHtml(): string {
             body: JSON.stringify({ mode })
           });
           const data = await res.json();
-          appendLog('✅ Browser switched to: ' + data.browserName);
+          appendLog('✅ Browser active: ' + data.browserName);
           document.getElementById('status-dot').className = 'status-dot';
           document.getElementById('status-text').innerText = 'Ready (' + (mode === 'own' ? 'My Browser' : 'Clean') + ')';
           refreshScreenshot();
@@ -896,6 +1230,117 @@ function getWebUiHtml(): string {
           document.getElementById('status-dot').className = 'status-dot';
           document.getElementById('status-text').innerText = 'Ready';
         }
+      }
+    }
+
+    async function runPrecheck() {
+      const resEl = document.getElementById('precheck-results');
+      const actionsEl = document.getElementById('precheck-actions');
+      resEl.innerHTML = '<div style="color:#93c5fd;">Running diagnostics on executable, CDP, and profile...</div>';
+      try {
+        const res = await fetch('/api/browser/precheck');
+        const data = await res.json();
+        let html = '';
+        data.tests.forEach(t => {
+          html += '<div class="precheck-test-item">' +
+                    '<span>' + t.name + '</span>' +
+                    '<span class="status-badge ' + t.status + '">' + t.status.toUpperCase() + '</span>' +
+                  '</div>' +
+                  '<div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:0.4rem; padding-left:0.6rem;">' +
+                    t.message + (t.fixHint ? '<br><span style="color:#fbbf24;">💡 ' + t.fixHint + '</span>' : '') +
+                  '</div>';
+        });
+        resEl.innerHTML = html;
+        if (!data.cdpActive) {
+          actionsEl.style.display = 'flex';
+        } else {
+          actionsEl.style.display = 'none';
+        }
+        appendLog('🔍 Browser pre-check complete. Status: ' + (data.ok ? 'PASS' : 'WARN'));
+      } catch (e) {
+        resEl.innerHTML = '<div style="color:#f87171;">Pre-check error: ' + e.message + '</div>';
+      }
+    }
+
+    async function launchArcDebug() {
+      appendLog('🚀 Launching Arc on port 9222...');
+      try {
+        const res = await fetch('/api/browser/launch-debug', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          appendLog('✅ ' + data.message);
+          runPrecheck();
+          loadBrowserStatus();
+          refreshScreenshot();
+        } else {
+          appendLog('⚠️ ' + data.message);
+        }
+      } catch (e) {
+        appendLog('❌ ' + e.message);
+      }
+    }
+
+    async function saveBrowserSettings() {
+      const payload = {
+        browserBinaryPath: document.getElementById('cfg-browser-bin').value.trim() || undefined,
+        browserUserDataDir: document.getElementById('cfg-browser-data').value.trim() || undefined,
+        useOwnBrowser: document.getElementById('cfg-use-own').checked,
+        keepBrowserOpen: document.getElementById('cfg-keep-open').checked,
+        headless: document.getElementById('cfg-headless').checked,
+        disableSecurity: document.getElementById('cfg-disable-sec').checked,
+        windowWidth: parseInt(document.getElementById('cfg-window-w').value, 10) || 1280,
+        windowHeight: parseInt(document.getElementById('cfg-window-h').value, 10) || 1100,
+        cdpUrl: document.getElementById('cfg-cdp-url').value.trim() || undefined,
+        wssUrl: document.getElementById('cfg-wss-url').value.trim() || undefined,
+        downloadPath: document.getElementById('cfg-download-dir').value.trim() || undefined,
+        agentHistoryPath: document.getElementById('cfg-history-dir').value.trim() || undefined,
+      };
+      await fetch('/api/browser/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      appendLog('💾 Browser settings saved successfully.');
+      alert('Browser settings saved!');
+      loadBrowserStatus();
+    }
+
+    async function applyAndTestBrowser() {
+      await saveBrowserSettings();
+      const mode = document.getElementById('cfg-use-own').checked ? 'own' : 'clean';
+      await selectBrowserMode(mode, true);
+      runPrecheck();
+    }
+
+    async function saveAgentSettings() {
+      const payload = {
+        llm: {
+          baseURL: document.getElementById('cfg-llm-url').value.trim(),
+          modelId: document.getElementById('cfg-llm-model').value.trim(),
+          temperature: parseFloat(document.getElementById('cfg-llm-temp').value) || 0.1
+        },
+        agent: {
+          maxSteps: parseInt(document.getElementById('cfg-agent-steps').value, 10) || 10
+        }
+      };
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      alert('Agent settings saved!');
+    }
+
+    async function clearMemory() {
+      try {
+        const res = await fetch('/api/clear', { method: 'POST' });
+        const data = await res.json();
+        appendLog('🧹 ' + data.message);
+        document.getElementById('timeline').innerHTML =
+          '<div class="step-item"><div class="step-header">Memory Cleared</div>' +
+          '<div class="step-desc">Session context reset. Ready for new task.</div></div>';
+      } catch (e) {
+        appendLog('❌ Clear failed: ' + e.message);
       }
     }
 
@@ -932,29 +1377,6 @@ function getWebUiHtml(): string {
       });
     }
 
-    async function saveSettings() {
-      const payload = {
-        llm: {
-          baseURL: document.getElementById('cfg-llm-url').value.trim(),
-          modelId: document.getElementById('cfg-llm-model').value.trim(),
-          temperature: parseFloat(document.getElementById('cfg-llm-temp').value) || 0.1
-        },
-        agent: {
-          maxSteps: parseInt(document.getElementById('cfg-agent-steps').value, 10) || 10
-        },
-        browser: {
-          browserBinaryPath: document.getElementById('cfg-browser-bin').value.trim() || undefined,
-          browserUserDataDir: document.getElementById('cfg-browser-data').value.trim() || undefined
-        }
-      };
-      await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      alert('Settings saved!');
-    }
-
     // SSE Stream setup
     const evt = new EventSource('/api/events');
     evt.addEventListener('agent_step', (e) => {
@@ -977,8 +1399,31 @@ function getWebUiHtml(): string {
       document.getElementById('run-btn').disabled = false;
       document.getElementById('status-dot').className = 'status-dot';
       document.getElementById('status-text').innerText = 'Ready';
-      appendLog('Goal completed: ' + data.result);
+      appendLog('✅ Goal completed: ' + (data.result || '').slice(0, 120));
       if (data.screenshot) updateScreenshot(data.screenshot);
+      // Show result in timeline
+      const timeline = document.getElementById('timeline');
+      if (data.result) {
+        const doneDiv = document.createElement('div');
+        doneDiv.className = 'step-item';
+        doneDiv.style.borderColor = 'rgba(16,185,129,0.4)';
+        doneDiv.innerHTML = '<div class="step-header" style="color:#34d399;">✅ Done</div>' +
+                            '<div class="step-result" style="white-space:pre-wrap;">' + data.result + '</div>';
+        timeline.appendChild(doneDiv);
+        timeline.scrollTop = timeline.scrollHeight;
+      }
+    });
+
+    evt.addEventListener('agent_error', (e) => {
+      const data = JSON.parse(e.data);
+      document.getElementById('run-btn').disabled = false;
+      document.getElementById('status-dot').className = 'status-dot';
+      document.getElementById('status-text').innerText = 'Error';
+      appendLog('❌ Agent error: ' + data.error);
+    });
+
+    evt.addEventListener('session_cleared', () => {
+      appendLog('🧹 Session memory cleared by server.');
     });
 
     evt.addEventListener('browser_switching', (e) => {

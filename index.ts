@@ -17,6 +17,27 @@ async function main() {
   const uiPort = parseInt(getCliOption(["--port", "-p"]) || "7788", 10);
   const interactive = hasCliFlag(["-i", "--interactive"]);
 
+  if (args.includes("precheck") || args.includes("--precheck") || args.includes("doctor")) {
+    const { runBrowserPrecheck } = await import("./src/browser_resolver.js");
+    console.log("\n🔍 Running Stagehand Browser Diagnostics & Pre-Check...\n");
+    const res = await runBrowserPrecheck(cfg.browser);
+    console.log(`Browser: ${res.browserName} (${res.isOsDefault ? "OS Default" : "Custom"})`);
+    console.log(`Binary:  ${res.binaryPath}`);
+    console.log(`Profile: ${res.userDataDir}`);
+    console.log(`Overall: ${res.ok ? "✅ READY TO USE" : "⚠️ NEEDS ATTENTION"}\n`);
+    for (const t of res.tests) {
+      const icon = t.status === "pass" ? "✅" : t.status === "warn" ? "⚠️" : "❌";
+      console.log(`  ${icon} [${t.status.toUpperCase()}] ${t.name}: ${t.message}`);
+      if (t.fixHint) console.log(`     💡 Fix hint: ${t.fixHint}`);
+    }
+    if (res.recommendations.length > 0) {
+      console.log("\n💡 Recommendations:");
+      res.recommendations.forEach((r) => console.log(`   - ${r}`));
+    }
+    console.log("");
+    process.exit(res.ok ? 0 : 1);
+  }
+
   // Extract prompt tokens
   const promptTokens: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -34,15 +55,24 @@ async function main() {
       a === "--no-headless" ||
       a === "--use-own-browser" ||
       a === "--my-browser" ||
-      a === "--own-browser"
+      a === "--own-browser" ||
+      a === "--keep-browser-open" ||
+      a === "--disable-security"
     ) {
       continue;
     }
-    if (a === "-c" || a === "--config" || a === "-p" || a === "--port") {
+    if (a === "-c" || a === "--config" || a === "-p" || a === "--port" || a === "--cdp" || a === "--cdp-url" || a === "--wss") {
       i++;
       continue;
     }
-    if (a.startsWith("-c=") || a.startsWith("--config=") || a.startsWith("-p=") || a.startsWith("--port=")) {
+    if (
+      a.startsWith("-c=") ||
+      a.startsWith("--config=") ||
+      a.startsWith("-p=") ||
+      a.startsWith("--port=") ||
+      a.startsWith("--cdp=") ||
+      a.startsWith("--wss=")
+    ) {
       continue;
     }
     promptTokens.push(a);

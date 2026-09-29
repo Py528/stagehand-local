@@ -15,6 +15,7 @@ import {
   getConversationContext,
   sessionMetrics,
   resetSessionMetrics,
+  resetSession,
   logSessionMetrics,
   validateAndResolveAttachments,
 } from "./conversation.js";
@@ -31,31 +32,64 @@ import { tryHeuristic, resetAdSkipState } from "./heuristics.js";
 import { compileGoal, type ExecutionPlan } from "./compiler.js";
 import { handleInterstitials } from "./interstitial.js";
 import { playbooks, autoLearnFromPage, tryDirectAtsFetch, findAtsUrlOnPage } from "./playbook.js";
+import {
+  tokenise,
+  findBestTrace,
+  recordTrace,
+  buildReplaySteps,
+  markReplaySuccess,
+  markReplayFail,
+  REPLAY_THRESHOLD,
+  REPLAY_THRESHOLD_STRUCTURAL,
+  type TraceStep,
+} from "./trace.js";
 
-export const PLANNER_PROMPT = `You are an autonomous web agent planner controlling a browser.
-Given the user goal, current page, action history, and session context, decide ONE next action.
+export const PLANNER_PROMPT = `You are an autonomous web agent planner controlling a real browser.
+Given the user goal, the current page state, action history, and session context, decide ONE next action.
 
-Actions:
-1. {"action":"navigate","url":"https://..."}
-2. {"action":"act","instruction":"atomic browser action description"}
-3. {"action":"extract","instruction":"what to extract from the page"}
-4. {"action":"wait","ms":2000}
-5. {"action":"done","message":"summary"}
+Available actions:
+1. {"action":"navigate","url":"https://..."}          — go to a URL directly
+2. {"action":"act","instruction":"..."}               — click/type/press on an element (be PRECISE)
+3. {"action":"extract","instruction":"..."}           — pull data from the current page
+4. {"action":"wait","ms":2000}                        — pause (max 10000ms)
+5. {"action":"done","message":"final answer here"}    — task complete, include full answer
 
-Rules:
-- For search queries (Google, YouTube, GitHub, etc.), navigate directly to the search URL when starting.
-  * Search Query Entity Preservation: Include ALL identifying keywords (subject, song title, and artist/channel/author name) in the search query URL. Never truncate or omit the artist/source name (e.g. "play crown on youtube from txt" → navigate to "https://www.youtube.com/results?search_query=crown+txt", NOT just "crown").
-- Multi-step Research & Deep Navigation:
-  * A search results page (e.g. Google Search) is only an index of links. To answer specific questions (e.g. company job openings, career roles, product features, pricing, documentation), DO NOT extract repeatedly on the search engine page. Use "navigate" to the target URL directly from the results or use "act" to CLICK the most relevant organic search result or careers link to visit the actual website (e.g. {"action":"navigate","url":"https://roboflow.com/careers"} or {"action":"act","instruction":"click on the Roboflow careers search result link"})!
-  * Once on the company's real website or careers board, THEN use "extract" to read the actual job listings or page content.
-- For video/media playback (e.g. YouTube):
-  * On search results: click the video title or thumbnail that best matches the requested title and artist.
-  * On the video page (/watch?v=...): you can seek to a timestamp by navigating to the URL with "&t=60s" (for 1 minute ahead) or clicking the video timeline.
-  * Once the requested video is open, loaded, or playing, return "done" immediately with a concise confirmation message. Do NOT loop actions on the player.
-- DO NOT repeat an action that failed or already succeeded — check history and dynamically adjust your plan.
-- If you have navigated to the destination page and extracted the factual answer satisfying the goal, return "done" with the answer summary.
-- If a "Page Snapshot" is provided, use it to understand what interactive elements (buttons, links, inputs) and content are on the current page. Target actions at real elements you can see in the snapshot.
-- Return ONLY valid JSON.`;
+═══ ACT INSTRUCTION RULES (critical — vague instructions cause failures) ═══
+• ALWAYS reference a VISIBLE element from the Page Snapshot. Never invent element labels.
+• Format: verb + exact visible text or ARIA label. Examples:
+    ✓ "click the button labeled 'Accept All Cookies'"
+    ✓ "type 'software engineer' into the search input field"
+    ✓ "click the link 'Anti-Hero (Official Music Video)' in the search results list"
+    ✗ "click the video"  ← too vague
+    ✗ "click submit"     ← use exact visible label from snapshot
+• For forms: fill fields one at a time. Use "type '...' into the <label> field".
+• For navigation inside a page: use "click the link/button '<exact text>'" not navigate.
+
+═══ SEARCH & NAVIGATION ═══
+• For search queries, navigate DIRECTLY to the search URL (never load the homepage first):
+    YouTube:  https://www.youtube.com/results?search_query=crown+txt
+    Google:   https://www.google.com/search?q=roboflow+careers&hl=en
+    GitHub:   https://github.com/search?q=...&type=repositories
+• Include ALL entity keywords in queries (artist, company, product name). Never truncate.
+• A search results page is an INDEX — do NOT extract from it. Click through to the target page.
+• On Google results: navigate directly to the company URL OR act to click the organic result.
+
+═══ VIDEO / MEDIA ═══
+• YouTube search results → click the video whose title best matches.
+• On /watch?v=...: seek to a timestamp by appending &t=<seconds>s to the URL.
+• Once the video is playing/loaded → return "done" immediately. Do NOT loop on the player.
+
+═══ FAILURE RECOVERY (mandatory when history shows repeated failures) ═══
+• If an act failed: read the snapshot carefully — find the EXACT element label and retry once.
+• If extract returned empty twice on the same URL: navigate to a deeper page or try a different selector.
+• If you are stuck (3+ steps with no progress): change strategy completely — try a different URL, a different search query, or a direct API shortcut.
+• Never repeat the exact same failed action. Every step must differ from the one before it.
+
+═══ DONE CRITERIA ═══
+• Return "done" ONLY when the factual answer or the requested action is confirmed complete.
+• For info tasks: include the answer text in the "message" field.
+• For media/navigation tasks: confirm what was opened/played.
+• Return ONLY valid JSON. No markdown, no explanation outside the JSON object.`;
 
 /** Extract and return the raw text. */
 export async function extractText(sh: Stagehand, instruction: string, page: any): Promise<string> {
@@ -364,8 +398,12 @@ export async function runAgent(
   }
   goal = attachCheck.resolvedInput;
 
-  resetSessionMetrics();
+  resetSession();        // clear prior task context so it doesn't bleed into this run
   resetAdSkipState();
+
+  // Collect steps for trace recording at end of run
+  const runStartMs = Date.now();
+  const currentRunSteps: TraceStep[] = [];
 
   // ─── TIER 0: Compile Goal Contract at t=0 (<300ms) ───
   let compiledPlan: ExecutionPlan | null = null;
@@ -385,6 +423,109 @@ export async function runAgent(
     // Non-fatal fallback
   }
 
+  // ─── TIER 0.5: Trace Memory Replay (<50ms, ~0 tokens) ───
+  // Check if we have a stored execution trace for a similar goal that can be replayed
+  try {
+    const service = compiledPlan?.service ?? "generic";
+    const intent = compiledPlan?.intent ?? "general_navigate";
+    const goalTokens = tokenise(goal);
+    const traceMatch = findBestTrace(service, intent, goalTokens);
+
+    if (traceMatch && traceMatch.score >= REPLAY_THRESHOLD_STRUCTURAL) {
+      const isStructural = traceMatch.score < REPLAY_THRESHOLD;
+      console.log(`\n   🧠 Trace Memory Hit! Score=${traceMatch.score.toFixed(2)} [${isStructural ? "structural" : "exact"}] (${traceMatch.trace.id})`);
+      console.log(`   📖 Replaying ${traceMatch.trace.steps.length}-step trace from "${traceMatch.trace.goal}"`);
+      if (Object.keys(traceMatch.substitutions).length > 0) {
+        console.log(`   🔄 Substitutions: ${JSON.stringify(traceMatch.substitutions)}`);
+      }
+
+      const replaySteps = buildReplaySteps(traceMatch);
+      const replayPage = await activePage(sh, initialPage);
+      let replaySuccess = false;
+      let replayAnswer: string | undefined;
+
+      for (let rIdx = 0; rIdx < replaySteps.length; rIdx++) {
+        const rStep = replaySteps[rIdx];
+        if (!rStep) continue;
+
+        const rUrl = await replayPage.url().catch(() => "about:blank");
+        const rTitle = await replayPage.title().catch(() => "");
+        const stepMs = Date.now();
+
+        try {
+          if (rStep.action === "navigate" && rStep.targetUrl) {
+            console.log(`   [R${rIdx + 1}] 🌐 ${rStep.targetUrl}`);
+            await navigate(replayPage, rStep.targetUrl);
+            await dismissCookies(sh, replayPage);
+            if (onStep) onStep({ step: rIdx + 1, maxSteps: replaySteps.length, title: rTitle, url: rUrl, plan: { action: "navigate", url: rStep.targetUrl } });
+
+          } else if (rStep.action === "act" && rStep.instruction) {
+            console.log(`   [R${rIdx + 1}] ⚡ "${rStep.instruction}"`);
+            const r = await retry(() => sh.act(rStep.instruction!, { page: replayPage }), "ReplayAct");
+            const msg = r.data?.message || "Done";
+            console.log(`   ✅ ${msg}`);
+            await replayPage.waitForLoadState("domcontentloaded").catch(() => {});
+            await sleep(cfg.agent.postActionMs);
+            if (onStep) onStep({ step: rIdx + 1, maxSteps: replaySteps.length, title: rTitle, url: rUrl, plan: { action: "act", instruction: rStep.instruction } });
+
+          } else if (rStep.action === "extract") {
+            const instr = rStep.extractInstruction || "extract main content";
+            console.log(`   [R${rIdx + 1}] 🔍 "${instr}"`);
+            const text = await extractText(sh, instr, replayPage);
+            if (isExtractionValid(text)) {
+              pinLatestExtraction(text, rUrl);
+              const finalUrl = await replayPage.url().catch(() => rUrl);
+              const syn = await synthesize(goal, text, finalUrl, true);
+              if (syn?.answer && syn.isComplete) {
+                replayAnswer = syn.answer;
+                replaySuccess = true;
+                if (onStep) {
+                  const sc = await captureScreenshotBase64(replayPage);
+                  onStep({ step: rIdx + 1, maxSteps: replaySteps.length, title: rTitle, url: finalUrl, plan: { action: "done", message: replayAnswer }, result: replayAnswer, screenshot: sc });
+                }
+                break;
+              }
+            }
+
+          } else if (rStep.action === "heuristic") {
+            // Heuristics replay themselves naturally in the next loop iteration; break out
+            replaySuccess = false;
+            break;
+          }
+
+          const stepRecord: TraceStep = { action: rStep.action, url: rUrl, elapsedMs: Date.now() - stepMs };
+          if (rStep.instruction !== undefined) stepRecord.instruction = rStep.instruction;
+          if (rStep.targetUrl !== undefined) stepRecord.targetUrl = rStep.targetUrl;
+          if (rStep.extractInstruction !== undefined) stepRecord.extractInstruction = rStep.extractInstruction;
+          currentRunSteps.push(stepRecord);
+
+        } catch (replayErr: any) {
+          console.warn(`   ⚠️ Replay step ${rIdx + 1} failed: ${replayErr?.message}. Falling back to full agent.`);
+          replaySuccess = false;
+          break;
+        }
+      }
+
+      if (replaySuccess && replayAnswer) {
+        markReplaySuccess(traceMatch.trace.id);
+        session.lastAnswer = replayAnswer;
+        console.log(`\n📢 Answer (from trace replay):\n${replayAnswer}\n`);
+        addToConversation({ role: "assistant", content: replayAnswer, label: "answer" });
+        session.history.push({ ts: ts(), url: await (await activePage(sh, initialPage)).url().catch(() => ""), goal, result: replayAnswer.slice(0, 2000) });
+        console.log(`🎉 Goal completed via Trace Memory Replay! (${Date.now() - runStartMs}ms)\n`);
+        sessionMetrics.tier0++;
+        sessionMetrics.tokensSaved += 1500;
+        logSessionMetrics();
+        return replayAnswer;
+      } else {
+        markReplayFail(traceMatch.trace.id);
+        console.log(`   ⚠️ Trace replay failed — falling back to full agent pipeline.\n`);
+      }
+    }
+  } catch {
+    // Non-fatal — continue to full agent
+  }
+
   const history: string[] = [];
   const actionRecords: Array<{
     action: string;
@@ -396,7 +537,8 @@ export async function runAgent(
   let lastActionKey = "";
 
   const context = getConversationContext();
-  const contextNote = context ? `\nSession context (prior data/conversation):\n${context.slice(0, 2000)}` : "";
+  // Only inject the last 800 chars of context into each planner step — enough signal, not a token bomb
+  const contextNote = context ? `\nRecent session context:\n${context.slice(-800)}` : "";
 
   for (let step = 1; step <= cfg.agent.maxSteps; step++) {
     const page = await activePage(sh, initialPage);
@@ -437,6 +579,26 @@ export async function runAgent(
         if (heuristic.doneMessage) {
           console.log(`\n🎉 ${heuristic.doneMessage}\n`);
           logSessionMetrics();
+          // ── Auto-record trace for heuristic fast-paths ──
+          try {
+            currentRunSteps.push({ action: "heuristic", url, instruction: heuristic.description });
+            const traceParams: import("./trace.js").TraceRecordingParams = {
+              goal,
+              service: compiledPlan?.service ?? "generic",
+              intent: compiledPlan?.intent ?? "general_navigate",
+              steps: currentRunSteps,
+              answerSnippet: heuristic.doneMessage.slice(0, 500),
+              answerDomain: normalizeDomain(url),
+              totalMs: Date.now() - runStartMs,
+              tier0: sessionMetrics.tier0,
+              tier1: sessionMetrics.tier1,
+              tier2: sessionMetrics.tier2,
+            };
+            if (compiledPlan?.targetName) traceParams.entity = compiledPlan.targetName;
+            if (compiledPlan?.creatorOrOrg) traceParams.creator = compiledPlan.creatorOrOrg;
+            recordTrace(traceParams);
+            console.log(`   💾 Trace recorded.`);
+          } catch {}
           // Auto-learn from this page
           const capturedUrls = Array.from(
             (getCapturedApiData() || "").matchAll(/\[([^\]]+)\]:/g)
@@ -498,6 +660,19 @@ export async function runAgent(
           addToConversation({ role: "assistant", content: answer, label: "answer" });
           session.history.push({ ts: ts(), url, goal, result: answer.slice(0, 2000) });
           console.log(`🎉 Goal completed via ATS Direct API Fast-Path!\n`);
+          currentRunSteps.push({ action: "ats_api", url, extractInstruction: goal, extractSnippet: answer.slice(0, 300) });
+          // ── Auto-record trace ──
+          try {
+            const tp: import("./trace.js").TraceRecordingParams = {
+              goal, service: compiledPlan?.service ?? "careers_ats", intent: compiledPlan?.intent ?? "info_extract",
+              steps: currentRunSteps, answerSnippet: answer.slice(0, 500), answerDomain: normalizeDomain(url),
+              totalMs: Date.now() - runStartMs, tier0: sessionMetrics.tier0, tier1: sessionMetrics.tier1, tier2: sessionMetrics.tier2,
+            };
+            if (compiledPlan?.targetName) tp.entity = compiledPlan.targetName;
+            if (compiledPlan?.creatorOrOrg) tp.creator = compiledPlan.creatorOrOrg;
+            recordTrace(tp);
+            console.log(`   💾 Trace recorded.`);
+          } catch {}
           logSessionMetrics();
           if (onStep) {
             const screenshot = await captureScreenshotBase64(page);
@@ -520,6 +695,11 @@ export async function runAgent(
 
     // ─── TIER 2: Distilled LLM Planner ───
     let snapshot = "";
+
+    // Cache distillPage for this URL — reuse the result if we already distilled earlier in this step
+    // Avoids running two separate page.evaluate() calls (one in extractText, one here)
+    let stepDistilled: import("./distill.js").DistilledPage | null = null;
+    const stepApiData = getCapturedApiData();
 
 
     // Dedicated Google SERP handling: AI Overview / Featured Snippet check & clean organic results
@@ -574,12 +754,17 @@ export async function runAgent(
 
     if (!snapshot) {
       // Distill page for planner context (~20ms in-browser)
-      const distilled = await distillPage(page);
-      const apiData = getCapturedApiData();
-      snapshot = buildPlannerSnapshot(distilled, apiData);
-      if (distilled.interactive.length > 0 || distilled.content.length > 50) {
-        console.log(`   📄 Distilled: ${distilled.interactive.length} elements, ~${Math.round(distilled.content.length / 4)} tokens`);
+      if (!stepDistilled) stepDistilled = await distillPage(page);
+      snapshot = buildPlannerSnapshot(stepDistilled, stepApiData);
+      if (stepDistilled.interactive.length > 0 || stepDistilled.content.length > 50) {
+        console.log(`   📄 Distilled: ${stepDistilled.interactive.length} elements, ~${Math.round(stepDistilled.content.length / 4)} tokens`);
       }
+    }
+
+    // Trim snapshot to stay under context budget (avoid 4k+ token planner prompts)
+    const MAX_SNAPSHOT_CHARS = 4000;
+    if (snapshot.length > MAX_SNAPSHOT_CHARS) {
+      snapshot = snapshot.slice(0, MAX_SNAPSHOT_CHARS) + "\n... [truncated]";
     }
 
     process.stdout.write(`   🤔 Planning...\r`);
@@ -625,9 +810,51 @@ export async function runAgent(
 
     const actionKey = `${plan.action}:${plan.instruction || plan.url || ""}`;
     if (actionKey === lastActionKey && plan.action !== "done" && plan.action !== "wait") {
-      console.log(`⚠️ Loop detected (same action repeated). Stopping.`);
-      logSessionMetrics();
-      return undefined;
+      console.log(`⚠️ Loop detected (same action repeated). Invoking recovery re-planner...`);
+
+      // ── Recovery Re-Planner: ask the LLM to break the loop with a completely different approach ──
+      try {
+        const recoveryC: any = await withTimeout(
+          localClient.chat.completions.create({
+            model: cfg.llm.modelId,
+            messages: [
+              {
+                role: "system",
+                content: `You are a recovery planner for a stuck web agent.
+The agent has attempted the SAME action twice with no progress. You must break the loop.
+
+Goal: "${goal}"
+Current Page: "${title}" (${url})
+Failed Action (repeated): ${JSON.stringify(plan)}
+Action History:
+${history.map((h, i) => `${i + 1}. ${h}`).join("\n")}
+
+Provide ONE new action that is COMPLETELY DIFFERENT from the failed action above.
+Try a different strategy: different URL, different selector wording, scroll the page, navigate to a sub-page, or use the direct search URL.
+Return ONLY valid JSON action: {"action":"...","instruction":"..."|"url":"..."|"message":"..."}`,
+              },
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.3,
+          }),
+          cfg.llm.stepTimeoutMs,
+          "RecoveryPlanner"
+        );
+        const recoveryPlan = JSON.parse(cleanJson(recoveryC?.choices?.[0]?.message?.content ?? "{}"));
+        if (recoveryPlan?.action && recoveryPlan.action !== plan.action) {
+          console.log(`   🔄 Recovery plan: ${JSON.stringify(recoveryPlan)}`);
+          plan = recoveryPlan;
+          lastActionKey = ""; // reset so this new plan can execute
+        } else {
+          console.log(`⚠️ Recovery planner returned same action. Stopping.`);
+          logSessionMetrics();
+          return answer;
+        }
+      } catch {
+        console.log(`⚠️ Recovery planner failed. Stopping.`);
+        logSessionMetrics();
+        return answer;
+      }
     }
     lastActionKey = actionKey;
 
@@ -657,6 +884,7 @@ export async function runAgent(
       console.log(`   🌐 ${target}`);
       history.push(`Nav → ${target}`);
       actionRecords.push({ action: "navigate", url: target });
+      currentRunSteps.push({ action: "navigate", url, targetUrl: target });
       if (onStep) onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan });
       try {
         await navigate(page, target);
@@ -685,6 +913,7 @@ export async function runAgent(
       console.log(`   ⚡ "${plan.instruction}"`);
       history.push(`Act: "${plan.instruction}"`);
       actionRecords.push({ action: "act", instruction: plan.instruction, url });
+      currentRunSteps.push({ action: "act", url, instruction: plan.instruction });
       if (onStep) onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan });
       try {
         const r = await retry(() => sh.act(plan.instruction, { page }), "Act");
@@ -813,6 +1042,7 @@ export async function runAgent(
         actionRecords.push({ action: "extract", instruction: plan.instruction, url, empty: false });
         console.log(`\n📄 Extracted:\n${text}\n`);
         pinLatestExtraction(text, url);
+        currentRunSteps.push({ action: "extract", url, extractInstruction: plan.instruction, extractSnippet: text.slice(0, 300) });
 
         const isFinalStep = step === cfg.agent.maxSteps;
         const syn = await synthesize(goal, text, url, isFinalStep);
@@ -825,6 +1055,18 @@ export async function runAgent(
           session.history.push({ ts: ts(), url, goal, result: answer.slice(0, 2000) });
           console.log(`🎉 Goal completed!\n`);
           logSessionMetrics();
+          // ── Auto-record trace ──
+          try {
+            const tp: import("./trace.js").TraceRecordingParams = {
+              goal, service: compiledPlan?.service ?? "generic", intent: compiledPlan?.intent ?? "general_navigate",
+              steps: currentRunSteps, answerSnippet: answer.slice(0, 500), answerDomain: normalizeDomain(url),
+              totalMs: Date.now() - runStartMs, tier0: sessionMetrics.tier0, tier1: sessionMetrics.tier1, tier2: sessionMetrics.tier2,
+            };
+            if (compiledPlan?.targetName) tp.entity = compiledPlan.targetName;
+            if (compiledPlan?.creatorOrOrg) tp.creator = compiledPlan.creatorOrOrg;
+            recordTrace(tp);
+            console.log(`   💾 Trace recorded (${currentRunSteps.length} steps).`);
+          } catch {}
           if (onStep) {
             const screenshot = await captureScreenshotBase64(page);
             onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan, result: answer, screenshot });
@@ -863,6 +1105,121 @@ export async function runAgent(
       await autoLearnFromPage(finalPage, finalUrl, capturedUrls);
     }
   } catch {}
+
+  // ── Final Verification: did we actually complete the goal? ──
+  // Run ONCE after the main loop ends. If the goal is not yet complete,
+  // produce one fresh recovery plan and execute it before giving up.
+  if (!answer) {
+    try {
+      const verifyPage = await activePage(sh, initialPage);
+      const verifyUrl = await verifyPage.url().catch(() => "about:blank");
+      const verifyTitle = await verifyPage.title().catch(() => "");
+      const verifyDistilled = await distillPage(verifyPage);
+      const verifySnapshot = buildPlannerSnapshot(verifyDistilled, getCapturedApiData());
+
+      process.stdout.write(`   🔍 Final verification — checking goal completion...\r`);
+      const verifyC: any = await withTimeout(
+        localClient.chat.completions.create({
+          model: cfg.llm.modelId,
+          messages: [
+            {
+              role: "system",
+              content: `You are a goal-completion verifier for a web agent.
+The main agent loop has ended without a confirmed answer. Check if the goal is complete based on the current page.
+
+Goal: "${goal}"
+Page: "${verifyTitle}" (${verifyUrl})
+Action History:
+${history.map((h, i) => `${i + 1}. ${h}`).join("\n")}
+
+Respond with JSON: {"isComplete": boolean, "answer": string, "nextAction": object|null}
+- "isComplete": true if the goal is achieved on the current page.
+- "answer": the answer text if complete, or empty string.
+- "nextAction": if NOT complete, the single best next action to try, in the same format as the planner
+  (e.g. {"action":"navigate","url":"..."} or {"action":"act","instruction":"..."} or {"action":"extract","instruction":"..."}).
+  Return null if you cannot determine a useful next step.`,
+            },
+            {
+              role: "user",
+              content: `Current page snapshot:\n${verifySnapshot.slice(0, 3000)}`,
+            },
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0.1,
+        }),
+        cfg.llm.stepTimeoutMs,
+        "FinalVerify"
+      );
+      process.stdout.write("                                                         \r");
+
+      const vResult = JSON.parse(cleanJson(verifyC?.choices?.[0]?.message?.content ?? "{}"));
+
+      if (vResult?.isComplete && vResult?.answer && String(vResult.answer).length > 10) {
+        answer = String(vResult.answer);
+        session.lastAnswer = answer;
+        console.log(`\n✅ Final verification confirmed goal complete.\n📢 Answer:\n${answer}\n`);
+        addToConversation({ role: "assistant", content: answer, label: "answer" });
+        session.history.push({ ts: ts(), url: verifyUrl, goal, result: answer.slice(0, 2000) });
+      } else if (vResult?.nextAction?.action) {
+        // Execute one more step from the verifier's plan
+        console.log(`\n   🔁 Final verifier suggests one more step: ${JSON.stringify(vResult.nextAction)}`);
+        const nextAct = vResult.nextAction;
+        try {
+          if (nextAct.action === "navigate" && nextAct.url) {
+            await navigate(verifyPage, nextAct.url);
+            await dismissCookies(sh, verifyPage);
+            const finalExtract = await extractText(sh, goal, verifyPage);
+            if (isExtractionValid(finalExtract)) {
+              const finalSyn = await synthesize(goal, finalExtract, nextAct.url, true);
+              if (finalSyn?.answer) {
+                answer = finalSyn.answer;
+                session.lastAnswer = answer;
+                console.log(`\n📢 Answer (post-verify):\n${answer}\n`);
+                addToConversation({ role: "assistant", content: answer, label: "answer" });
+                session.history.push({ ts: ts(), url: nextAct.url, goal, result: answer.slice(0, 2000) });
+              }
+            }
+          } else if (nextAct.action === "extract" && nextAct.instruction) {
+            const finalExtract = await extractText(sh, nextAct.instruction, verifyPage);
+            if (isExtractionValid(finalExtract)) {
+              const finalSyn = await synthesize(goal, finalExtract, verifyUrl, true);
+              if (finalSyn?.answer) {
+                answer = finalSyn.answer;
+                session.lastAnswer = answer;
+                console.log(`\n📢 Answer (post-verify extract):\n${answer}\n`);
+                addToConversation({ role: "assistant", content: answer, label: "answer" });
+                session.history.push({ ts: ts(), url: verifyUrl, goal, result: answer.slice(0, 2000) });
+              }
+            }
+          } else if (nextAct.action === "act" && nextAct.instruction) {
+            await retry(() => sh.act(nextAct.instruction, { page: verifyPage }), "PostVerifyAct");
+            await verifyPage.waitForLoadState("domcontentloaded").catch(() => {});
+            await sleep(cfg.agent.postActionMs);
+            const postActExtract = await extractText(sh, goal, verifyPage);
+            if (isExtractionValid(postActExtract)) {
+              const finalSyn = await synthesize(goal, postActExtract, verifyUrl, true);
+              if (finalSyn?.answer) {
+                answer = finalSyn.answer;
+                session.lastAnswer = answer;
+                console.log(`\n📢 Answer (post-verify act):\n${answer}\n`);
+                addToConversation({ role: "assistant", content: answer, label: "answer" });
+                session.history.push({ ts: ts(), url: verifyUrl, goal, result: answer.slice(0, 2000) });
+              }
+            }
+          }
+        } catch (verifyActErr: any) {
+          console.warn(`   ⚠️ Post-verify action failed: ${verifyActErr?.message}`);
+        }
+      } else {
+        console.log(`   ℹ️ Final verifier: goal not complete and no recovery action available.`);
+      }
+    } catch (verifyErr: any) {
+      // Non-fatal — just log and fall through
+      if (!verifyErr?.message?.includes("timed out")) {
+        console.warn(`   ⚠️ Final verification error: ${verifyErr?.message}`);
+      }
+    }
+  }
 
   logSessionMetrics();
   return answer;

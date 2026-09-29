@@ -28,6 +28,8 @@ import {
 import { runScan } from "./scan.js";
 import { getWorkspaceFiles, matchFiles, openInEditor } from "./files.js";
 import { retry, sleep, ts } from "./utils.js";
+import { listTraces, getTraceStats } from "./trace.js";
+import { resetSession } from "./conversation.js";
 
 export function cliCompleter(line: string): [string[], string] {
   // @file autocompletion anywhere in prompt
@@ -42,7 +44,7 @@ export function cliCompleter(line: string): [string[], string] {
   // /command autocompletion
   const slashMatch = line.match(/^\/([^\s]*)$/);
   if (slashMatch) {
-    const cmds = ["/attach", "/clear", "/context", "/edit", "/files", "/help", "/history", "/paste", "/exit"];
+    const cmds = ["/attach", "/clear", "/context", "/edit", "/files", "/help", "/history", "/paste", "/reset", "/exit"];
     const prefix = slashMatch[1] ?? "";
     const hits = cmds.filter((c) => c.startsWith("/" + prefix));
     return [hits.length ? hits : cmds, slashMatch[0]];
@@ -65,6 +67,7 @@ export function cliCompleter(line: string): [string[], string] {
       "back",
       "url",
       "history",
+      "traces",
       "config",
       "help",
       "exit",
@@ -91,6 +94,9 @@ export function printHelp(): void {
 │    --headless                Run browser in headless mode                    │
 │    --headed, --no-headless   Run browser in headed mode (visible window)      │
 │    --use-own-browser         Run with default desktop browser & real sessions │
+│    --cdp <url>               Connect over CDP (e.g. http://127.0.0.1:9222)   │
+│    --keep-browser-open       Keep browser open between tasks                 │
+│    --disable-security        Disable web security & CORS checks              │
 │    -c, --config <path>       Specify custom config.json path                 │
 │    -h, --help                Show command help                               │
 │    "<instruction>"           Execute one-shot prompt and exit                │
@@ -129,7 +135,9 @@ export function printHelp(): void {
 │ Data                                                                         │
 │   save [file]               Save last extraction/answer                      │
 │   history                   Session history                                  │
+│   traces                    Show self-learned execution trace memory         │
 │   config                    Show current config                              │
+│   reset, /reset             Clear session memory (keep files attached)       │
 │                                                                              │
 │ Chaining                                                                     │
 │   cmd1 ; cmd2 ; cmd3        Sequential execution                             │
@@ -179,9 +187,16 @@ export async function runCommand(raw: string, sh: Stagehand, page: any): Promise
     return true;
   }
 
-  // ── /clear ──
-  if (/^(\/)?clear$/i.test(line)) {
+  // ── /clear (terminal) ──
+  if (/^(\/)?(clear)$/i.test(line)) {
     console.clear();
+    return true;
+  }
+
+  // ── /reset — clear session memory ──
+  if (/^(\/)?(reset|clear.?memory|clearmem)$/i.test(line)) {
+    resetSession();
+    console.log("\n🧹 Session memory cleared. Attached files kept.\n");
     return true;
   }
 
@@ -358,6 +373,47 @@ export async function runCommand(raw: string, sh: Stagehand, page: any): Promise
   if (/^config$/i.test(line)) {
     console.log(`\n⚙️  Config (${CONFIG_PATH}):`);
     console.log(JSON.stringify(cfg, null, 2), "\n");
+    return true;
+  }
+
+  // ── traces ──
+  if (/^traces?$/i.test(line)) {
+    const stats = getTraceStats();
+    if (stats.total === 0) {
+      console.log("\n🧠 No traces recorded yet. Run some goals and they'll be stored automatically.\n");
+      return true;
+    }
+    const byService = Object.entries(stats.byService).map(([k, v]) => `${k}: ${v}`).join(", ");
+    const byIntent = Object.entries(stats.byIntent).map(([k, v]) => `${k}: ${v}`).join(", ");
+    console.log(`\n🧠 Trace Memory (${stats.total} traces, ${stats.totalReplays} replays)`);
+    console.log(`   Services: ${byService}`);
+    console.log(`   Intents:  ${byIntent}\n`);
+    const top = listTraces(10);
+    for (const t of top) {
+      const reliability = t.replayCount > 0
+        ? ` | ✅ ${t.replayCount} replays${t.failCount > 0 ? ` / ❌ ${t.failCount} fails` : ""}`
+        : "";
+      console.log(`  🔹 [${t.service}/${t.intent}] "${t.goal.slice(0, 60)}" — ${t.steps.length} steps${reliability}`);
+    }
+    console.log();
+    return true;
+  }
+
+  // ── precheck / doctor ──
+  if (/^(precheck|doctor|diagnostics)$/i.test(line)) {
+    const { runBrowserPrecheck } = await import("./browser_resolver.js");
+    console.log("\n🔍 Running browser pre-check...");
+    const res = await runBrowserPrecheck(cfg.browser);
+    console.log(`Browser: ${res.browserName} (${res.isOsDefault ? "OS Default" : "Custom"})`);
+    console.log(`Binary:  ${res.binaryPath}`);
+    console.log(`Profile: ${res.userDataDir}`);
+    console.log(`Status:  ${res.ok ? "✅ READY" : "⚠️ NEEDS ATTENTION"}\n`);
+    for (const t of res.tests) {
+      const icon = t.status === "pass" ? "✅" : t.status === "warn" ? "⚠️" : "❌";
+      console.log(`  ${icon} ${t.name}: ${t.message}`);
+      if (t.fixHint) console.log(`     💡 ${t.fixHint}`);
+    }
+    console.log("");
     return true;
   }
 

@@ -23,6 +23,11 @@ export async function setupRouteBlocking(target: any): Promise<void> {
   } catch {}
 }
 
+export function isDashboardUrl(url: string): boolean {
+  if (!url) return false;
+  return /127\.0\.0\.1:7788|localhost:7788/i.test(url);
+}
+
 export async function activePage(sh: Stagehand, fallback: any): Promise<any> {
   try {
     let ctx: any = null;
@@ -32,20 +37,45 @@ export async function activePage(sh: Stagehand, fallback: any): Promise<any> {
     }
     const a = await ctx?.activePage?.().catch(() => null);
     if (a) {
-      setupApiInterceptor(a);
-      await setupRouteBlocking(a);
-      return a;
+      const u = await a.url().catch(() => "");
+      if (!isDashboardUrl(u)) {
+        setupApiInterceptor(a);
+        await setupRouteBlocking(a);
+        return a;
+      }
     }
     const ps = await ctx?.pages?.().catch(() => null);
     if (ps?.length) {
-      const p = ps[ps.length - 1];
-      setupApiInterceptor(p);
-      await setupRouteBlocking(p);
-      return p;
+      for (let i = ps.length - 1; i >= 0; i--) {
+        const p = ps[i];
+        const u = await p.url().catch(() => "");
+        if (!isDashboardUrl(u)) {
+          setupApiInterceptor(p);
+          await setupRouteBlocking(p);
+          return p;
+        }
+      }
+      if (typeof ctx?.newPage === "function") {
+        const fresh = await ctx.newPage();
+        setupApiInterceptor(fresh);
+        await setupRouteBlocking(fresh);
+        return fresh;
+      }
     }
   } catch {}
-  setupApiInterceptor(fallback);
-  await setupRouteBlocking(fallback);
+  if (fallback) {
+    const u = await fallback.url?.().catch(() => "");
+    if (isDashboardUrl(u) && fallback.context) {
+      try {
+        const fresh = await fallback.context().newPage();
+        setupApiInterceptor(fresh);
+        await setupRouteBlocking(fresh);
+        return fresh;
+      } catch {}
+    }
+    setupApiInterceptor(fallback);
+    await setupRouteBlocking(fallback);
+  }
   return fallback;
 }
 

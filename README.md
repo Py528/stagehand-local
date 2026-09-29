@@ -259,7 +259,15 @@ Stagehand> scan outreach.csv careers_url "Are there open remote engineering role
   },
   "browser": {
     "headless": false,
-    "defaultTimeout": 30000
+    "defaultTimeout": 30000,
+    "useOwnBrowser": true,
+    "keepBrowserOpen": true,
+    "disableSecurity": false,
+    "windowWidth": 1280,
+    "windowHeight": 1100,
+    "browserBinaryPath": "/Applications/Arc.app/Contents/MacOS/Arc",
+    "browserUserDataDir": "/Users/pranavshinde/Library/Application Support/Arc/User Data",
+    "cdpUrl": "http://127.0.0.1:9222"
   },
   "agent": {
     "maxSteps": 10,
@@ -268,30 +276,40 @@ Stagehand> scan outreach.csv careers_url "Are there open remote engineering role
     "postActionMs": 800,
     "synthesize": true,
     "contextWindowChars": 24000
-  },
-  "shortcuts": {
-    "youtube": "https://www.youtube.com/results?search_query={{query}}",
-    "google": "https://www.google.com/search?q={{query}}",
-    "github": "https://github.com/search?q={{query}}&type=repositories",
-    "hn": "https://hn.algolia.com/?q={{query}}",
-    "npm": "https://www.npmjs.com/search?q={{query}}"
-  },
-  "cookieDismiss": [
-    "Accept all",
-    "Accept all cookies",
-    "Accept cookies",
-    "I agree",
-    "Got it",
-    "Allow all",
-    "Close"
-  ]
+  }
 }
 ```
+
+### 🌐 Using Your Own Browser (Arc / Chrome / Brave) With Saved Passwords & Logins
+
+Stagehand Local supports controlling your personal browser directly with all your logged-in accounts (Google, GitHub, social logins) and saved passwords:
+
+1. **Pre-Check Diagnostics**:
+   Run the pre-check tool anytime to verify your executable, profile data, and CDP status:
+   ```bash
+   npx tsx index.ts precheck
+   ```
+2. **Web UI Browser Settings Tab**:
+   Open `http://127.0.0.1:7788`, navigate to **🌐 Browser Settings**, and:
+   - Pick your browser from auto-detected buttons (`Arc`, `Google Chrome`, `Brave`).
+   - Toggle **Use Own Browser**, **Keep Browser Open**, and **Disable Security**.
+   - Click **Run Pre-Check** for instant health validation.
+   - Click **Launch / Attach Arc on Port 9222** to start Arc with remote debugging.
+3. **Starting Arc directly with Remote Debugging**:
+   ```bash
+   /Applications/Arc.app/Contents/MacOS/Arc --remote-debugging-port=9222 '--remote-allow-origins=*'
+   ```
 
 ### Environment Variable Overrides
 
 | Variable | Description | Example |
 |---|---|---|
+| `USE_OWN_BROWSER` | Use personal desktop browser instead of clean Playwright Chromium | `USE_OWN_BROWSER=true` |
+| `BROWSER_PATH` | Path to custom browser executable | `BROWSER_PATH="/Applications/Arc.app/Contents/MacOS/Arc"` |
+| `BROWSER_USER_DATA`| Path to browser user profile directory | `BROWSER_USER_DATA="~/Library/Application Support/Arc/User Data"` |
+| `BROWSER_CDP` | Connect directly via CDP port | `BROWSER_CDP="http://127.0.0.1:9222"` |
+| `KEEP_BROWSER_OPEN` | Keep browser open across multiple tasks | `KEEP_BROWSER_OPEN=true` |
+| `DISABLE_SECURITY` | Disable web security & CORS checks | `DISABLE_SECURITY=true` |
 | `HEADLESS` | Run browser in headless mode (`true` / `false`) | `HEADLESS=true` |
 | `LLAMA_BASE_URL` | Override LLM base API URL | `LLAMA_BASE_URL=http://localhost:11434/v1` |
 | `MODEL_ID` | Override LLM model name | `MODEL_ID=unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ4_XS` |

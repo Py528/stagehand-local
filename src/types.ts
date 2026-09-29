@@ -10,9 +10,18 @@ export interface BrowserConfig {
   headless: boolean;
   defaultTimeout: number;
   useOwnBrowser?: boolean | undefined;
+  keepBrowserOpen?: boolean | undefined;
+  disableSecurity?: boolean | undefined;
+  windowWidth?: number | undefined;
+  windowHeight?: number | undefined;
   browserBinaryPath?: string | undefined;
   browserUserDataDir?: string | undefined;
   cdpUrl?: string | undefined;
+  wssUrl?: string | undefined;
+  recordingPath?: string | undefined;
+  tracePath?: string | undefined;
+  agentHistoryPath?: string | undefined;
+  downloadPath?: string | undefined;
 }
 
 export interface AgentConfig {

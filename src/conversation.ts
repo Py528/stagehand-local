@@ -21,6 +21,21 @@ export function resetSessionMetrics(): void {
   metricsLogged = false;
 }
 
+/**
+ * Clear all session state for a fresh task.
+ * Call this at the start of each new agent goal so prior context
+ * does not bleed into the next task.
+ */
+export function resetSession(): void {
+  session.lastExtraction = "";
+  session.lastAnswer = "";
+  session.conversation = [];
+  session.batchResults = [];
+  session.history = [];
+  // Intentionally keep attachedFiles — user may want to keep their resume/docs across tasks
+  resetSessionMetrics();
+}
+
 export function logSessionMetrics(): void {
   if (metricsLogged) return;
   metricsLogged = true;
