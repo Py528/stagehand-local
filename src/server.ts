@@ -378,7 +378,9 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
   });
 
   server.listen(port, () => {
-    console.log(`\n🌐 Stagehand Web UI active at http://127.0.0.1:${port}`);
+    console.log(`\n🌐 Stagehand Web UI active at \x1b[4mhttp://127.0.0.1:${port}\x1b[0m`);
+    console.log(`   Press Ctrl+C to stop | Close terminal = session keeps running`);
+    console.log(`   Reconnect anytime: npx tsx index.ts --reconnect\n`);
   });
 
   return server;

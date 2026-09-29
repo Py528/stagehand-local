@@ -92,6 +92,8 @@ export function printHelp(): void {
 │    -i, --interactive         Start interactive REPL mode                     │
 │    --ui, --web               Start the Web UI Dashboard                      │
 │    --port <number>           Web UI port (default: 7788)                     │
+│    --reconnect               Reconnect to a running session (opens browser)  │
+│    status / --status         Check if a session is currently running         │
 │    --headless                Run browser in headless mode                    │
 │    --headed, --no-headless   Run browser in headed mode (visible window)      │
 │    --use-own-browser         Run with default desktop browser & real sessions │

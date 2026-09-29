@@ -3,6 +3,10 @@ import { isNetworkOrCdpError } from "./src/utils.js";
 import { runCommand, startInteractiveCli, printHelp } from "./src/cli.js";
 import { startWebServer } from "./src/server.js";
 import { getOrSwitchBrowser, closeActiveBrowserSession } from "./src/browser_manager.js";
+import {
+  writeSessionInfo, getActiveSession, ignoreSighup,
+  registerCleanup, clearSessionInfo,
+} from "./src/session.js";
 
 async function main() {
 
@@ -10,6 +14,43 @@ async function main() {
 
   if (args.includes("--help") || args.includes("-h")) {
     printHelp();
+    process.exit(0);
+  }
+
+  // ── status: check if a session is already running ──────────────────────────
+  if (args.includes("status") || args.includes("--status")) {
+    const active = await getActiveSession();
+    if (active) {
+      const age = Math.round((Date.now() - new Date(active.startedAt).getTime()) / 60000);
+      console.log(`\n✅ Session running (PID ${active.pid}, started ${age}m ago)`);
+      console.log(`   Web UI: ${active.url}`);
+      console.log(`   Last active: ${new Date(active.lastActiveAt).toLocaleTimeString()}`);
+      console.log(`\n   Reconnect: open ${active.url} in your browser`);
+      console.log(`   Or run:    npx tsx index.ts --reconnect\n`);
+    } else {
+      console.log("\n⚪ No active session found.\n");
+      console.log("   Start one with:  npx tsx index.ts --ui\n");
+    }
+    process.exit(0);
+  }
+
+  // ── reconnect: open existing session UI in browser ─────────────────────────
+  if (args.includes("--reconnect") || args.includes("reconnect")) {
+    const active = await getActiveSession();
+    if (active) {
+      const age = Math.round((Date.now() - new Date(active.startedAt).getTime()) / 60000);
+      console.log(`\n✅ Reconnecting to session (PID ${active.pid}, started ${age}m ago)`);
+      console.log(`   Web UI: ${active.url}`);
+      console.log(`\n   Opening in browser...\n`);
+      // Open the URL in the default browser
+      const { exec } = await import("node:child_process");
+      exec(`open "${active.url}" 2>/dev/null || xdg-open "${active.url}" 2>/dev/null || start "${active.url}"`);
+      // Also print for terminal copy-paste
+      console.log(`   If browser didn't open, navigate to: ${active.url}\n`);
+    } else {
+      console.log("\n⚪ No active session found. Start one with:\n");
+      console.log("   npx tsx index.ts --ui\n");
+    }
     process.exit(0);
   }
 
@@ -93,6 +134,10 @@ async function main() {
 
   // Mode 1: Web UI Server
   if (isUiMode) {
+    // Write session info + survive terminal close (SIGHUP)
+    writeSessionInfo(uiPort);
+    ignoreSighup();
+    registerCleanup();
     startWebServer(sh, page, uiPort);
     if (prompt) {
       try {
