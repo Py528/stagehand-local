@@ -43,9 +43,13 @@ import {
   buildReplaySteps,
   markReplaySuccess,
   markReplayFail,
+  replayWithSelectorChain,
+  extractSelectorChain,
+  traceReliability,
   REPLAY_THRESHOLD,
   REPLAY_THRESHOLD_STRUCTURAL,
   type TraceStep,
+  type SelectorChain,
 } from "./trace.js";
 import {
   extractPattern,
@@ -54,7 +58,6 @@ import {
   markPatternSuccess,
   markPatternFail,
 } from "./patterns.js";
-import { tryDirectApi } from "./apis.js";
 
 export const PLANNER_PROMPT = `You are an autonomous web agent planner controlling a real browser.
 Given the user goal, the current page state, action history, and session context, decide ONE next action.
@@ -442,57 +445,8 @@ export async function runAgent(
     try { return extractPattern(goal); } catch { return null; }
   })();
 
-  // ─── TIER -1: Direct API Fast-path (~50-200ms, 0 LLM calls, 0 browser steps) ───
-  // For structured queries (weather, YouTube search, restaurant hours) we can
-  // answer directly via API — no browser navigation, no LLM, dramatically faster.
-  // Falls through immediately if no API applies or if the API call fails.
-  try {
-    const apiResult = await tryDirectApi(goal);
-    if (apiResult) {
-      const t1ms = apiResult.latencyMs;
 
-      if (apiResult.answer.startsWith("__YOUTUBE_NAVIGATE__:")) {
-        // YouTube: we got the direct video URL — navigate there directly, skip search step
-        const [, watchUrl, videoTitle, channelTitle] = apiResult.answer.split(":");
-        if (watchUrl) {
-          console.log(`   🎬 Tier -1: Direct YouTube URL — ${videoTitle ?? "video"} by ${channelTitle ?? "?"}`);
-          console.log(`   🌐 ${watchUrl}`);
-          const directPage = await activePage(sh, initialPage);
-          await navigate(directPage, watchUrl);
-          await dismissCookies(sh, directPage);
-          currentRunSteps.push({ action: "navigate", url: "about:blank", targetUrl: watchUrl });
-          // Let Tier 0 heuristics handle ad-skip + playback verification from here
-          // (the loop below will handle it normally, just starting from the watch page)
-          // Skip to the main agent loop — don't return yet
-        }
-      } else if (apiResult.isComplete && apiResult.answer) {
-        // Full answer from API — return immediately, no browser needed
-        const answer = apiResult.answer;
-        session.lastAnswer = answer;
-        addToConversation({ role: "assistant", content: answer, label: "answer" });
-        session.history.push({ ts: ts(), url: "api://direct", goal, result: answer.slice(0, 2000) });
-        console.log(`\n📢 Answer (${apiResult.source}, ${t1ms}ms):\n${answer}\n`);
-        console.log(`📊 [Execution Stats] Tier -1 (Direct API): 1 | LLM Calls: 0\n`);
-        sessionMetrics.tier0 += 3; // count as 3 tier-0 operations (big win)
-        sessionMetrics.tokensSaved += 4000;
-        // Record the pattern so next time it's a zero-work replay
-        if (abstractGoalForRecording) {
-          try {
-            recordPattern({
-              abstractGoal: abstractGoalForRecording,
-              steps: [{ action: "heuristic", url: "api://direct",
-                instruction: `Direct API: ${apiResult.source}` }],
-              totalMs: t1ms,
-              answerSnippet: answer.slice(0, 200),
-            });
-          } catch {}
-        }
-        return answer;
-      }
-    }
-  } catch { /* non-fatal — continue to normal pipeline */ }
-
-  // ─── TIER 0: Compile Goal Contract at t=0 (<300ms) ───
+    // ─── TIER 0: Compile Goal Contract at t=0 (<300ms) ───
   let compiledPlan: ExecutionPlan | null = null;
   try {
     compiledPlan = await compileGoal(goal);
@@ -672,10 +626,34 @@ export async function runAgent(
             if (onStep) onStep({ step: rIdx + 1, maxSteps: replaySteps.length, title: rTitle, url: rUrl, plan: { action: "navigate", url: rStep.targetUrl } });
 
           } else if (rStep.action === "act" && rStep.instruction) {
-            console.log(`   [R${rIdx + 1}] ⚡ "${rStep.instruction}"`);
-            const r = await retry(() => sh.act(rStep.instruction!, { page: replayPage }), "ReplayAct");
-            const msg = r.data?.message || "Done";
-            console.log(`   ✅ ${msg}`);
+            // ── SelectorChain replay (zero LLM) ──
+            // If this step has a stored SelectorChain, try it before falling back to sh.act().
+            // SelectorChain tries role → text → css → xpath in order — no LLM needed.
+            let actSucceeded = false;
+            if (rStep.selectorChain && Object.keys(rStep.selectorChain).length > 1) {
+              console.log(`   [R${rIdx + 1}] 🔗 SelectorChain replay (${Object.keys(rStep.selectorChain).filter(k => !["lastWorking","replayUses","lastSuccessAt"].includes(k)).join("→")})...`);
+              const scResult = await replayWithSelectorChain(replayPage, rStep.selectorChain, 3000);
+              if (scResult.success) {
+                actSucceeded = true;
+                console.log(`   ✅ SelectorChain hit via "${scResult.level}" in ${scResult.elapsedMs}ms`);
+                // Update chain metadata for next replay
+                if (scResult.level) rStep.selectorChain.lastWorking  = scResult.level;
+                rStep.selectorChain.lastSuccessAt = new Date().toISOString();
+                rStep.selectorChain.replayUses    = (rStep.selectorChain.replayUses ?? 0) + 1;
+                if (scResult.selfHealed) {
+                  console.log(`   🔧 Self-healed: updated lastWorking to "${scResult.level}"`);
+                }
+              }
+            }
+
+            // Fallback: sh.act() with LLM if SelectorChain failed or not stored
+            if (!actSucceeded) {
+              console.log(`   [R${rIdx + 1}] ⚡ "${rStep.instruction}"`);
+              const r = await retry(() => sh.act(rStep.instruction!, { page: replayPage }), "ReplayAct");
+              const msg = r.data?.message || "Done";
+              console.log(`   ✅ ${msg}`);
+            }
+
             await replayPage.waitForLoadState("domcontentloaded").catch(() => {});
             await waitForDOMQuiet(replayPage, 300, cfg.agent.postActionMs * 2 || 2000); // adaptive vs fixed sleep
             if (onStep) onStep({ step: rIdx + 1, maxSteps: replaySteps.length, title: rTitle, url: rUrl, plan: { action: "act", instruction: rStep.instruction } });
@@ -1168,13 +1146,34 @@ Return ONLY valid JSON action: {"action":"...","instruction":"..."|"url":"..."|"
       console.log(`   ⚡ "${plan.instruction}"`);
       history.push(`Act: "${plan.instruction}"`);
       actionRecords.push({ action: "act", instruction: plan.instruction, url });
-      currentRunSteps.push({ action: "act", url, instruction: plan.instruction });
+      const runStep: TraceStep = { action: "act", url, instruction: plan.instruction };
+      currentRunSteps.push(runStep);
       if (onStep) onStep({ step, maxSteps: cfg.agent.maxSteps, title, url, plan });
       try {
         const r = await retry(() => sh.act(plan.instruction, { page }), "Act");
         const msg = r.data?.message || "Done";
         console.log(`   ✅ ${msg}`);
         history.push(`Result: ${msg}`);
+
+        // ── Post-act: extract stable SelectorChain from the element just clicked ──
+        // This upgrades future replays from LLM-dependent to zero-LLM.
+        // Runs in background (don't await) so it doesn't slow down the main loop.
+        (async () => {
+          try {
+            // Stagehand stores last selector info on the act result
+            const lastSelector: string | undefined =
+              (r as any)?.data?.selector || (r as any)?.selector;
+            if (lastSelector && lastSelector.length > 0) {
+              const chain = await extractSelectorChain(page, lastSelector);
+              if (chain && (chain.role || chain.text || chain.css)) {
+                if (lastSelector.startsWith("/")) chain.xpath = lastSelector;
+                chain.lastWorking = chain.role ? "role" : chain.text ? "text" : "css";
+                runStep.selectorChain = chain;
+              }
+            }
+          } catch { /* non-fatal — selector extraction is best-effort */ }
+        })();
+
         await page.waitForLoadState("domcontentloaded").catch(() => {});
         await waitForDOMQuiet(page, 300, cfg.agent.postActionMs * 2 || 2000); // adaptive vs fixed sleep
       } catch (e: any) {

@@ -19,18 +19,55 @@ import { fileURLToPath } from "node:url";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
+/**
+ * SelectorChain — ordered from most stable to least stable.
+ *
+ * Replay tries each level in order. On failure, it tries the next.
+ * On success with a fallback selector, it updates the chain for next time.
+ *
+ * Stability ranking (most → least):
+ *   role+name  — semantic, survives redesigns (Playwright getByRole)
+ *   text       — readable, usually stable (getByText)
+ *   css        — structural but named (id, data-*) attributes
+ *   xpath      — most fragile, breaks on any DOM restructure
+ *
+ * Example for "click first YouTube video":
+ *   role:  { role: "link", name: /crown/i }         ← survives YouTube redesign
+ *   css:   "ytd-video-renderer a#video-title"        ← 5-year stable YouTube selector
+ *   xpath: "/html[1]/body[1]/ytd-app[1]/...//a[1]"  ← last resort, frequently breaks
+ */
+export interface SelectorChain {
+  /** Playwright getByRole: most stable. Role + accessible name (can be regex string). */
+  role?: { role: string; name: string; exact?: boolean };
+  /** Playwright getByText: human-readable label. */
+  text?: string;
+  /** CSS selector using stable attributes (id, data-*, aria-*). Avoid class selectors. */
+  css?: string;
+  /** XPath — least stable. Only used as fallback. Stored for self-healing: when this
+   *  fails and role/text succeeds, the chain is updated with the new element's selectors. */
+  xpath?: string;
+  /** Which selector was last successful (used to start from best known working level) */
+  lastWorking?: "role" | "text" | "css" | "xpath";
+  /** How many times this chain has been used in replay */
+  replayUses?: number;
+  /** ISO timestamp of last successful replay using this chain */
+  lastSuccessAt?: string;
+}
+
 export interface TraceStep {
   action: "navigate" | "act" | "extract" | "wait" | "heuristic" | "ats_api";
   /** URL the page was at when this step ran */
   url: string;
-  /** For act: the natural-language instruction */
+  /** For act: the natural-language instruction (used as fallback if SelectorChain fails) */
   instruction?: string;
   /** For navigate: the target URL */
   targetUrl?: string;
   /** For extract: the extraction instruction + result snippet (first 300 chars) */
   extractInstruction?: string;
   extractSnippet?: string;
-  /** DOM selector(s) that were targeted (harvested from distilled interactive list) */
+  /** Stable multi-level selector chain for act steps — replaces fragile single XPath */
+  selectorChain?: SelectorChain;
+  /** Legacy: DOM selector(s) from Stagehand AX tree (kept for backward compat) */
   selectors?: string[];
   /** Elapsed ms for this step */
   elapsedMs?: number;
@@ -497,3 +534,168 @@ export function listTraces(limit = 20): ExecutionTrace[] {
     )
     .slice(0, limit);
 }
+
+// ── SelectorChain Replay Engine ─────────────────────────────────────────────
+//
+// This is the core of zero-LLM path replay. Instead of sh.act() (which costs
+// 1-3s LLM + AX tree), we try selectors in order from most stable to least.
+// On success: update lastWorking and lastSuccessAt for that chain.
+// On failure of lower levels: triggers self-healing (re-extract from page).
+
+export type SelectorLevel = "role" | "text" | "css" | "xpath";
+
+export interface SelectorResult {
+  success: boolean;
+  level?: SelectorLevel;       // which level worked
+  selfHealed?: boolean;        // did we discover a better selector?
+  newChain?: SelectorChain;    // updated chain if self-healed
+  elapsedMs: number;
+}
+
+/**
+ * Try to click an element using the SelectorChain without LLM.
+ * Falls back through role → text → css → xpath → null.
+ * On failure, optionally self-heals by extracting stable selectors from the page.
+ */
+export async function replayWithSelectorChain(
+  page: any,
+  chain: SelectorChain,
+  timeoutMs = 3000
+): Promise<SelectorResult> {
+  const t0 = Date.now();
+
+  // Determine starting level (use lastWorking to skip re-checking failed levels)
+  const levels: SelectorLevel[] = ["role", "text", "css", "xpath"];
+  const startIdx = chain.lastWorking ? levels.indexOf(chain.lastWorking) : 0;
+
+  // Try from last known working level forward, then wrap to earlier levels
+  const orderedLevels = [
+    ...levels.slice(startIdx),
+    ...levels.slice(0, startIdx),
+  ] as SelectorLevel[];
+
+  for (const level of orderedLevels) {
+    try {
+      let locator: any = null;
+
+      if (level === "role" && chain.role) {
+        const { role, name, exact } = chain.role;
+        // Convert string regex back to RegExp if it looks like one
+        const nameArg = name.startsWith("/") && name.endsWith("/i")
+          ? new RegExp(name.slice(1, -2), "i")
+          : name.startsWith("/") && name.endsWith("/")
+            ? new RegExp(name.slice(1, -1))
+            : name;
+        locator = page.getByRole(role, { name: nameArg, exact: exact ?? false });
+      } else if (level === "text" && chain.text) {
+        locator = page.getByText(chain.text, { exact: false });
+      } else if (level === "css" && chain.css) {
+        locator = page.locator(chain.css);
+      } else if (level === "xpath" && chain.xpath) {
+        locator = page.locator(chain.xpath);
+      }
+
+      if (!locator) continue;
+
+      // Check element is visible before clicking
+      const visible = await locator.first().isVisible({ timeout: Math.min(timeoutMs, 1500) });
+      if (!visible) continue;
+
+      await locator.first().click({ timeout: timeoutMs });
+
+      return {
+        success: true,
+        level,
+        selfHealed: level !== chain.lastWorking && chain.lastWorking !== undefined,
+        elapsedMs: Date.now() - t0,
+      };
+    } catch {
+      // This level failed — try next
+    }
+  }
+
+  return { success: false, elapsedMs: Date.now() - t0 };
+}
+
+/**
+ * After a successful act(), extract a SelectorChain from the element
+ * that was just clicked. Call this post-act to upgrade concrete XPath
+ * traces to stable semantic selectors.
+ */
+export async function extractSelectorChain(
+  page: any,
+  xpathOrCss: string
+): Promise<SelectorChain | null> {
+  try {
+    const chain = await page.evaluate((selector: string): SelectorChain | null => {
+      // Try to find the element using the selector
+      let el: Element | null = null;
+      try {
+        // Try CSS first
+        el = document.querySelector(selector);
+        if (!el) {
+          // Try XPath
+          const result = document.evaluate(
+            selector, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+          );
+          el = result.singleNodeValue as Element | null;
+        }
+      } catch { return null; }
+
+      if (!el) return null;
+
+      // Extract stable identifiers
+      const role   = el.getAttribute("role") ||
+                     el.tagName.toLowerCase().replace("ytd-", "").split("-")[0] || "";
+      const ariaLabel = el.getAttribute("aria-label") || "";
+      const textContent = (el as HTMLElement).innerText?.trim().slice(0, 80) || "";
+      const id     = el.id ? `#${el.id}` : "";
+      const dataId = Array.from(el.attributes)
+        .find(a => a.name.startsWith("data-") && a.value.length < 50);
+
+      // Build stable CSS selector (prefer id > data-* > tagName+class pattern)
+      const parent = el.parentElement;
+      const parentTag = parent?.tagName.toLowerCase() ?? "";
+      let css = "";
+      if (id) css = id;
+      else if (dataId) css = `[${dataId.name}="${dataId.value}"]`;
+      else if (parentTag && id) css = `${parentTag} ${id}`;
+      else if (el.tagName === "A" && parentTag.includes("video")) css = `${parentTag} a`;
+
+      // exactOptionalPropertyTypes: only include defined fields
+      const out: SelectorChain = {};
+      if (role && textContent) out.role = { role: role === "a" ? "link" : role, name: textContent.slice(0, 50) };
+      if (textContent) out.text = textContent;
+      if (css) out.css = css;
+      return out;
+    }, xpathOrCss);
+
+    return chain;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reliability score for a trace: 0 (never use) → 1 (always use).
+ * Accounts for success rate, recency, and step count.
+ */
+export function traceReliability(trace: ExecutionTrace): number {
+  const total = trace.replayCount + trace.failCount;
+  if (total === 0) return 0.5; // never replayed — unknown reliability
+
+  const successRate = trace.replayCount / total;
+
+  // Recency: penalize paths not used in >7 days (may have stale selectors)
+  const daysSinceLastSuccess = trace.replayCount > 0
+    ? (Date.now() - new Date(trace.recordedAt).getTime()) / 86_400_000
+    : 999;
+  const recencyScore = Math.max(0, 1 - daysSinceLastSuccess / 30); // 0 after 30 days
+
+  // Brevity: shorter paths are more reliable (less can go wrong)
+  const brevityScore = Math.max(0, 1 - (trace.steps.length - 1) / 10);
+
+  // Weighted combination
+  return Math.min(1, 0.6 * successRate + 0.25 * recencyScore + 0.15 * brevityScore);
+}
+
