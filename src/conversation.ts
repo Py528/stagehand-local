@@ -35,12 +35,19 @@ export function resetSessionMetrics(): void {
  * Everything else (history, metrics, old conversation) is cleared.
  */
 export function softResetSession(): void {
-  // Carry forward ALL pinned extractions + the last answer from the previous task.
-  // This allows immediate follow-up questions to reference any data extracted in the last run.
-  // Example: user asks "check banh house timing" → extracts hours → asks "can I visit at 4:30?"
-  //          → soft reset carries Banh House hours + "open 12-10:30" answer forward.
+  // Carry forward ALL pinned FACTUAL extractions + the last answer from the previous task.
+  // EXCLUDE media extractions (song lyrics, video captions) — they're noise for follow-ups.
+  // This allows: "check banh house hours" → "can I visit at 4:30?" without re-navigating.
+  const isMediaExtraction = (e: ConversationEntry): boolean => {
+    const c = e.content;
+    // Exclude if contains song lyrics markers (Hindi [संगीत], English [music], or ♪)
+    if (/\[संगीत\]|\[music\]|♪|\blyrics?\b/i.test(c)) return true;
+    // Exclude if extracted from a YouTube watch page or Spotify
+    if (/Extracted from.*youtube\.com\/watch|Extracted from.*spotify\.com/i.test(c)) return true;
+    return false;
+  };
   const pinnedExtractions = session.conversation.filter(
-    (e) => e.label === "extraction" && e.pinned
+    (e) => e.label === "extraction" && e.pinned && !isMediaExtraction(e)
   );
   const lastAnswer = session.conversation.findLast(
     (e) => e.label === "answer"

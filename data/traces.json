@@ -142,5 +142,36 @@
     "tier0": 2,
     "tier1": 0,
     "tier2": 1
+  },
+  "generic_general_navigate_tx3ibi": {
+    "id": "generic_general_navigate_tx3ibi",
+    "goal": "go to YouTube and play chamak challlo",
+    "goalTokens": [
+      "chamak",
+      "challlo"
+    ],
+    "service": "generic",
+    "intent": "general_navigate",
+    "answerDomain": "youtube.com",
+    "steps": [
+      {
+        "action": "act",
+        "url": "https://www.youtube.com/results?search_query=go+to+YouTube+and+play+chamak+challlo",
+        "instruction": "click the link 'Lyrical: Chammak Challo | Ra One | ShahRukh Khan | Kareena Kapoor'"
+      },
+      {
+        "action": "heuristic",
+        "url": "https://www.youtube.com/watch?v=oAVhUAaVCVQ&list=RDoAVhUAaVCVQ&start_radio=1",
+        "instruction": "⚡ Heuristic: Resumed playback"
+      }
+    ],
+    "answerSnippet": "Video is now playing.",
+    "recordedAt": "2026-09-29T10:32:45.157Z",
+    "replayCount": 0,
+    "failCount": 0,
+    "totalMs": 58898,
+    "tier0": 4,
+    "tier1": 0,
+    "tier2": 1
   }
 }
