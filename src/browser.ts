@@ -127,7 +127,8 @@ export async function dismissCookies(sh: Stagehand, page: any): Promise<void> {
 export async function captureScreenshotBase64(page: any): Promise<string> {
   try {
     const buf = await page.screenshot({ type: "jpeg", quality: 75 });
-    return buf.toString("base64");
+    // Playwright may return Uint8Array or Buffer — Buffer.from() handles both
+    return Buffer.from(buf).toString("base64");
   } catch {
     return "";
   }
