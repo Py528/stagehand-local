@@ -880,7 +880,26 @@ export function getWebUiHtml(cfg: Config): string {
     }
 
     // ── SSE Event stream ──────────────────────────────────────────────────────
-    const evt = new EventSource('/api/events');
+    let sseReconnectTimer = null;
+
+    function connectSSE() {
+      if (sseReconnectTimer) { clearTimeout(sseReconnectTimer); sseReconnectTimer = null; }
+      const evt = new EventSource('/api/events');
+
+      evt.onerror = () => {
+        // Connection dropped (server restart, network blip).
+        // Reset agentBusy so the UI isn't stuck — the server-side flag resets on restart anyway.
+        agentBusy = false;
+        document.getElementById('send-btn').disabled = false;
+        setStatus('error', 'Reconnecting…');
+        removeThinkingMsg();
+        evt.close();
+        sseReconnectTimer = setTimeout(connectSSE, 2000);
+      };
+
+      evt.addEventListener('open', () => {
+        setStatus('ready', 'Ready');
+      });
 
     evt.addEventListener('agent_step', (e) => {
       const d = JSON.parse(e.data);
@@ -973,7 +992,19 @@ export function getWebUiHtml(cfg: Config): string {
       if (d.tokensSaved > 0) { sv.style.display = ''; document.getElementById('s-sv').innerText = d.tokensSaved; }
     });
 
+    } // end connectSSE()
+
     // ── Init ──────────────────────────────────────────────────────────────────
+    // Check if server is already busy before connecting SSE (prevents stuck button on page reload)
+    fetch('/api/status').then(r => r.json()).then(d => {
+      if (!d.running) {
+        agentBusy = false;
+        document.getElementById('send-btn').disabled = false;
+      }
+      if (d.page?.screenshot) updateScreenshot(d.page.screenshot);
+      if (d.page?.title) document.getElementById('page-title').innerText = d.page.title;
+    }).catch(() => {});
+    connectSSE();
     loadBrowserStatus();
     refreshScreenshot();
   </script>
