@@ -112,10 +112,18 @@ export function ignoreSighup(): void {
   });
 }
 
-// Clean up session file on normal exit
-export function registerCleanup(): void {
-  const cleanup = () => { clearSessionInfo(); process.exit(0); };
-  process.on("SIGINT",  cleanup);   // Ctrl+C
-  process.on("SIGTERM", cleanup);   // kill / system shutdown
+// Clean up session file and close browser on normal exit
+export function registerCleanup(onShutdown?: () => Promise<void>): void {
+  let cleaningUp = false;
+  const cleanup = async () => {
+    if (cleaningUp) return;
+    cleaningUp = true;
+    console.log("\n[Session] Shutting down — closing browser...");
+    try { if (onShutdown) await onShutdown(); } catch {}
+    clearSessionInfo();
+    process.exit(0);
+  };
+  process.on("SIGINT",  () => { void cleanup(); });   // Ctrl+C
+  process.on("SIGTERM", () => { void cleanup(); });   // kill / system shutdown
   // NOT SIGHUP — that's the terminal-close signal we want to survive
 }

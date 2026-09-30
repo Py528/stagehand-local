@@ -137,7 +137,7 @@ async function main() {
     // Write session info + survive terminal close (SIGHUP)
     writeSessionInfo(uiPort);
     ignoreSighup();
-    registerCleanup();
+    registerCleanup(closeActiveBrowserSession);
     startWebServer(sh, page, uiPort);
     if (prompt) {
       try {
