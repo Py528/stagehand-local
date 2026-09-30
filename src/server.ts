@@ -1,4 +1,7 @@
 import http from "node:http";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import type { Stagehand } from "@browserbasehq/stagehand";
 import { cfg, saveConfig, CONFIG_PATH } from "./config.js";
 import {
@@ -372,6 +375,21 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
     if (url.pathname === "/" || url.pathname === "/index.html") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(getWebUiHtml(cfg));
+      return;
+    }
+
+    // Serve static app JS (extracted from template literal to avoid escaping issues)
+    if (url.pathname === "/app.js") {
+      const __dirname = path.dirname(fileURLToPath(import.meta.url));
+      const appJsPath = path.resolve(__dirname, "app.js");
+      try {
+        const js = fs.readFileSync(appJsPath, "utf-8");
+        res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+        res.end(js);
+      } catch {
+        res.writeHead(404);
+        res.end("app.js not found");
+      }
       return;
     }
 
