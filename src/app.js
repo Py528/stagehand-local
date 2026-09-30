@@ -139,11 +139,6 @@ function addAnswerMsg(text, source, goal) {
   const div = document.createElement('div');
   div.className = 'msg agent answer-msg';
   div.innerHTML = `
-    <div class="msg-label">Stagehand</div>
-    <div class="answer-bubble">
-      <div class="answer-body">${formatAnswer(text)}</div>
-      <button class="copy-btn" onclick="copyAnswer(this)" title="Copy answer">⎘</button>
-    </div>
     ${sourceBadgeHtml(source, goal)}
   `;
   chat.appendChild(div);
@@ -481,5 +476,3 @@ fetch('/api/status').then(r => r.json()).then(d => {
 connectSSE();
 loadBrowserStatus();
 refreshScreenshot();
-  </script>
-</body>
