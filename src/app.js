@@ -138,9 +138,27 @@ function addAnswerMsg(text, source, goal) {
   const chat = document.getElementById('chat-messages');
   const div = document.createElement('div');
   div.className = 'msg agent answer-msg';
-  div.innerHTML = `
-    ${sourceBadgeHtml(source, goal)}
-  `;
+  const bubble = document.createElement('div');
+  bubble.className = 'answer-bubble';
+  const body = document.createElement('div');
+  body.className = 'answer-body';
+  body.innerHTML = formatAnswer(text);
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'copy-btn';
+  copyBtn.title = 'Copy answer';
+  copyBtn.textContent = '⎘';
+  copyBtn.onclick = () => copyAnswer(copyBtn);
+  bubble.appendChild(body);
+  bubble.appendChild(copyBtn);
+  div.appendChild(document.createElement('div')).className = 'msg-label';
+  div.querySelector('.msg-label').textContent = 'Stagehand';
+  div.appendChild(bubble);
+  const badgeHtml = sourceBadgeHtml(source, goal);
+  if (badgeHtml) {
+    const badgeWrap = document.createElement('div');
+    badgeWrap.innerHTML = badgeHtml;
+    div.appendChild(badgeWrap.firstChild);
+  }
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
 }
@@ -398,12 +416,18 @@ evt.addEventListener('agent_done', (e) => {
 
   removeThinkingMsg();
 
-  const result = d.result && d.result !== 'Done' ? d.result : null;
+  // Use session.lastAnswer as fallback — some paths return "Done" as a sentinel
+  // but set the real answer in session.lastAnswer via the source field
+  const result = (d.result && d.result !== 'Done') ? d.result
+               : (d.lastAnswer && d.lastAnswer !== 'Done') ? d.lastAnswer
+               : null;
   if (result) {
     addAnswerMsg(result, d.source || 'generic', d.prompt || '');
     appendLog('✅ Done: ' + result.slice(0, 100), 'done');
-  } else if (d.result === 'Done') {
-    // fallback: agent said "Done" with no real answer — show nothing, it was a media task etc.
+  } else if (d.result === 'Done' && !d.lastAnswer) {
+    // Silent completion (media playback etc.) — show nothing in chat
+    appendLog('✅ Task complete', 'done');
+  } else {
     appendLog('✅ Task complete', 'done');
   }
   if (d.screenshot) updateScreenshot(d.screenshot);
