@@ -23,13 +23,14 @@
       }
     ],
     "exampleGoals": [
-      "play turn tv off, on YouTube"
+      "play turn tv off, on YouTube",
+      "could you play Punjabi song on youtube"
     ],
-    "successCount": 1,
-    "failCount": 0,
-    "avgSteps": 3,
-    "avgMs": 48608,
+    "successCount": 2,
+    "failCount": 1,
+    "avgSteps": 4,
+    "avgMs": 81714,
     "createdAt": "2026-09-29T10:16:17.017Z",
-    "lastUsed": "2026-09-29T10:16:17.017Z"
+    "lastUsed": "2026-09-30T04:38:52.543Z"
   }
 }

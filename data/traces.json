@@ -59,7 +59,7 @@
     "answerSnippet": "Now playing \"TXT (투모로우바이투게더) '어느날 머리에서 뿔이 자랐다 (CROWN)' Official MV\" on YouTube.",
     "recordedAt": "2026-09-29T09:13:33.921Z",
     "replayCount": 0,
-    "failCount": 2,
+    "failCount": 3,
     "totalMs": 52831,
     "tier0": 4,
     "tier1": 0,
@@ -170,6 +170,56 @@
     "replayCount": 0,
     "failCount": 0,
     "totalMs": 58898,
+    "tier0": 4,
+    "tier1": 0,
+    "tier2": 1
+  },
+  "youtube_media_play_ygtftl": {
+    "id": "youtube_media_play_ygtftl",
+    "goal": "could you play Punjabi song on youtube",
+    "goalTokens": [
+      "you",
+      "punjabi",
+      "song"
+    ],
+    "service": "youtube",
+    "intent": "media_play",
+    "answerDomain": "youtube.com",
+    "steps": [
+      {
+        "action": "act",
+        "url": "about:blank",
+        "instruction": "click the link 'tv off (투모로우바이투게더) '어느날 머리에서 뿔이 자랐다 (turn)' Official MV'",
+        "elapsedMs": 6255
+      },
+      {
+        "action": "act",
+        "url": "about:blank",
+        "instruction": "click the link 'Kendrick Lamar - tv off (Official Audio)'",
+        "elapsedMs": 4060
+      },
+      {
+        "action": "act",
+        "url": "about:blank",
+        "elapsedMs": 4079,
+        "instruction": "click the link 'punjabi song (투모로우바이투게더) '어느날 머리에서 뿔이 자랐다 (you)' Official MV'"
+      },
+      {
+        "action": "act",
+        "url": "https://www.youtube.com/results?search_query=Punjabi+song",
+        "instruction": "click the link 'New Punjabi Songs 2026 | Doctor Saab (Official Video) Korala Maan ft Gurlez Akhtar' in the search results"
+      },
+      {
+        "action": "heuristic",
+        "url": "https://www.youtube.com/watch?v=dGAJv50TEZU&list=RDdGAJv50TEZU&start_radio=1",
+        "instruction": "⚡ Heuristic: Resumed playback"
+      }
+    ],
+    "answerSnippet": "Video is now playing.",
+    "recordedAt": "2026-09-30T04:38:52.542Z",
+    "replayCount": 0,
+    "failCount": 0,
+    "totalMs": 114818,
     "tier0": 4,
     "tier1": 0,
     "tier2": 1

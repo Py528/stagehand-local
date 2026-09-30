@@ -173,6 +173,67 @@ export function getWebUiHtml(cfg: Config): string {
     .bubble strong { color: #79c0ff; }
     .bubble code { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; background: rgba(255,255,255,.05); padding: 1px 4px; border-radius: 3px; }
 
+    /* ── Answer bubble (rich output) ── */
+    .answer-bubble {
+      position: relative;
+      background: var(--agent-bubble);
+      border: 1px solid var(--border-soft);
+      border-left: 3px solid var(--accent);
+      border-bottom-left-radius: 4px;
+      border-radius: var(--radius);
+      padding: 11px 36px 11px 14px;
+      font-size: 13px; line-height: 1.65; word-break: break-word;
+      color: var(--text);
+      max-width: 100%;
+    }
+    .answer-body { min-width: 0; }
+    .answer-body strong { color: #79c0ff; }
+    .answer-body em { color: var(--text-muted); font-style: italic; }
+    .answer-body code { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 3px; }
+    .answer-body pre.code-block {
+      background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+      padding: 10px 12px; margin: 8px 0; overflow-x: auto;
+    }
+    .answer-body pre.code-block code { background: none; padding: 0; font-size: 11px; }
+    .answer-body .ans-h2 { font-size: 13px; font-weight: 700; color: var(--text); margin: 8px 0 4px; }
+    .answer-body .ans-h3 { font-size: 12px; font-weight: 600; color: #79c0ff; margin: 6px 0 3px; }
+    .answer-body .ans-ul, .answer-body .ans-ol { padding-left: 18px; margin: 4px 0; }
+    .answer-body .ans-ul li, .answer-body .ans-ol li { margin: 2px 0; }
+
+    /* copy button */
+    .copy-btn {
+      position: absolute; top: 8px; right: 8px;
+      background: none; border: 1px solid var(--border-soft); color: var(--text-dim);
+      border-radius: 4px; padding: 1px 5px; font-size: 11px; cursor: pointer;
+      transition: all .15s; opacity: 0;
+    }
+    .answer-bubble:hover .copy-btn { opacity: 1; }
+    .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* source row */
+    .source-row {
+      display: flex; align-items: center; gap: 8px;
+      margin-top: 4px; padding-left: 2px;
+    }
+    .source-badge {
+      font-size: 10px; padding: 2px 8px; border-radius: 999px;
+      border: 1px solid var(--border-soft); color: var(--text-dim);
+      background: rgba(255,255,255,.03);
+    }
+    .source-badge.src-unverified { border-color: rgba(210,153,34,.3); color: var(--warning); background: rgba(210,153,34,.07); }
+    .source-badge.src-verified   { border-color: rgba(63,185,80,.3);  color: var(--success); background: rgba(63,185,80,.07);  }
+    .source-badge.src-api        { border-color: rgba(68,147,248,.3); color: var(--accent);  background: var(--accent-dim);    }
+    .source-badge.src-replay     { border-color: rgba(163,113,247,.3); color: #a78bfa;        background: rgba(163,113,247,.07); }
+    .source-badge.src-memory     { border-color: rgba(255,255,255,.1); color: var(--text-muted); }
+
+    /* verify button */
+    .verify-btn {
+      font-size: 10px; padding: 2px 8px; border-radius: 999px;
+      border: 1px solid rgba(210,153,34,.4); color: var(--warning);
+      background: rgba(210,153,34,.1); cursor: pointer; transition: all .15s;
+    }
+    .verify-btn:hover { background: rgba(210,153,34,.2); border-color: var(--warning); }
+
     /* step pills in chat */
     .step-pill {
       font-size: 11px; padding: 4px 10px; border-radius: 999px;
@@ -553,21 +614,85 @@ export function getWebUiHtml(cfg: Config): string {
     }
 
     function formatAnswer(text) {
-      // Basic markdown: **bold**, code, newlines → <br>
+      // Full markdown rendering: headings, bold, italic, bullet lists, code, links, newlines
       return text
         .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+        // code blocks (triple-backtick fences)
+        .replace(/CODEBLOCK_START[\s\S]*?CODEBLOCK_END/g, m => m) // placeholder — real handling below
+        // inline code
         .replace(/\`([^\`]+)\`/g,'<code>$1</code>')
+        // bold
+        .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+        // italic
+        .replace(/\*(.+?)\*/g,'<em>$1</em>')
+        // headings
+        .replace(/^### (.+)$/gm,'<div class="ans-h3">$1</div>')
+        .replace(/^## (.+)$/gm,'<div class="ans-h2">$1</div>')
+        // bullet lists: consecutive lines starting with "- " or "• "
+        .replace(/((?:^[-•] .+\n?)+)/gm, block => {
+          const items = block.trim().split('\n').map(l => \`<li>\${escHtml(l.replace(/^[-•] /,''))}</li>\`).join('');
+          return \`<ul class="ans-ul">\${items}</ul>\`;
+        })
+        // numbered lists
+        .replace(/((?:^\d+\. .+\n?)+)/gm, block => {
+          const items = block.trim().split('\n').map(l => \`<li>\${escHtml(l.replace(/^\d+\. /,''))}</li>\`).join('');
+          return \`<ol class="ans-ol">\${items}</ol>\`;
+        })
+        // newlines → <br>
         .replace(/\\n/g,'<br>');
     }
 
-    function addAnswerMsg(text) {
+    function sourceBadgeHtml(source, goal) {
+      if (!source || source === 'generic') return '';
+      const labels = {
+        google_serp:    { icon: '🔍', text: 'From Google (unverified)', cls: 'src-unverified' },
+        direct_site:    { icon: '✅', text: 'Verified from source',     cls: 'src-verified'   },
+        playbook_api:   { icon: '⚡', text: 'From ATS API',             cls: 'src-api'        },
+        pattern_replay: { icon: '🧩', text: 'Pattern replay',           cls: 'src-replay'     },
+        trace_replay:   { icon: '🧠', text: 'Trace replay',             cls: 'src-replay'     },
+        heuristic:      { icon: '⚡', text: 'Fast-path heuristic',      cls: 'src-replay'     },
+        conversational: { icon: '💬', text: 'From session memory',      cls: 'src-memory'     },
+      };
+      const badge = labels[source] || { icon: '•', text: source, cls: '' };
+      const verifyBtn = (source === 'google_serp')
+        ? \`<button class="verify-btn" onclick="verifyAtSource(\\'\${escAttr(goal)}\\')">Verify at source →</button>\`
+        : '';
+      return \`<div class="source-row"><span class="source-badge \${badge.cls}">\${badge.icon} \${badge.text}</span>\${verifyBtn}</div>\`;
+    }
+
+    function addAnswerMsg(text, source, goal) {
       const chat = document.getElementById('chat-messages');
       const div = document.createElement('div');
-      div.className = 'msg agent';
-      div.innerHTML = \`<div class="msg-label">Stagehand</div><div class="bubble">\${formatAnswer(text)}</div>\`;
+      div.className = 'msg agent answer-msg';
+      div.innerHTML = \`
+        <div class="msg-label">Stagehand</div>
+        <div class="answer-bubble">
+          <div class="answer-body">\${formatAnswer(text)}</div>
+          <button class="copy-btn" onclick="copyAnswer(this)" title="Copy answer">⎘</button>
+        </div>
+        \${sourceBadgeHtml(source, goal)}
+      \`;
       chat.appendChild(div);
       chat.scrollTop = chat.scrollHeight;
+    }
+
+    async function verifyAtSource(originalGoal) {
+      const followUp = \`go to the actual source page and verify: \${originalGoal}\`;
+      const ta = document.getElementById('agent-prompt');
+      ta.value = followUp;
+      submitPrompt();
+    }
+
+    function copyAnswer(btn) {
+      const body = btn.closest('.answer-bubble').querySelector('.answer-body');
+      navigator.clipboard.writeText(body.innerText).then(() => {
+        btn.textContent = '✓';
+        setTimeout(() => btn.textContent = '⎘', 1500);
+      });
+    }
+
+    function escAttr(s) {
+      return String(s).replace(/'/g, '&apos;').replace(/"/g, '&quot;');
     }
 
     function escHtml(s) {
@@ -785,9 +910,13 @@ export function getWebUiHtml(cfg: Config): string {
 
       removeThinkingMsg();
 
-      if (d.result) {
-        addAnswerMsg(d.result);
-        appendLog('✅ Done: ' + d.result.slice(0, 100), 'done');
+      const result = d.result && d.result !== 'Done' ? d.result : null;
+      if (result) {
+        addAnswerMsg(result, d.source || 'generic', d.prompt || '');
+        appendLog('✅ Done: ' + result.slice(0, 100), 'done');
+      } else if (d.result === 'Done') {
+        // fallback: agent said "Done" with no real answer — show nothing, it was a media task etc.
+        appendLog('✅ Task complete', 'done');
       }
       if (d.screenshot) updateScreenshot(d.screenshot);
       if (d.title) document.getElementById('page-title').innerText = d.title;

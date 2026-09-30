@@ -274,9 +274,11 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
                   localClient
                 );
                 const finalScreenshot = await captureScreenshotBase64(activePg);
+                session.lastSource = "conversational";
                 broadcast("agent_done", {
                   prompt: resolvedPrompt,
                   result: session.lastAnswer || "Done",
+                  source: session.lastSource,
                   screenshot: finalScreenshot,
                   ts: ts(),
                 });
@@ -288,7 +290,7 @@ export function startWebServer(sh: Stagehand, page: any, port = 7788): http.Serv
               });
 
               const finalScreenshot = await captureScreenshotBase64(activePg);
-              broadcast("agent_done", { prompt: resolvedPrompt, result: result || "Done", screenshot: finalScreenshot, ts: ts() });
+              broadcast("agent_done", { prompt: resolvedPrompt, result: result || session.lastAnswer || "Done", source: session.lastSource || "generic", screenshot: finalScreenshot, ts: ts() });
             } catch (err: any) {
               broadcast("agent_error", { error: err?.message || String(err), ts: ts() });
             } finally {

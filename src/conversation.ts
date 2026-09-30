@@ -2,7 +2,7 @@ import path from "node:path";
 import { cfg } from "./config.js";
 import { isNearDuplicate, withTimeout } from "./utils.js";
 import { readFileContent } from "./files.js";
-import type { ConversationEntry, SessionState, SessionMetrics } from "./types.js";
+import type { ConversationEntry, SessionState, SessionMetrics, AnswerSource } from "./types.js";
 
 export const sessionMetrics: SessionMetrics = {
   tier0: 0,
@@ -57,6 +57,7 @@ export function softResetSession(): void {
   const lastExtraction = pinnedExtractions[pinnedExtractions.length - 1];
   session.lastExtraction = lastExtraction?.content.split("\n").slice(1).join("\n") ?? "";
   session.lastAnswer = "";  // answer is in conversation entries, not needed separately
+  session.lastSource = "generic";
   session.batchResults = [];
   session.history = [];
 
@@ -77,6 +78,7 @@ export function softResetSession(): void {
 export function resetSession(): void {
   session.lastExtraction = "";
   session.lastAnswer = "";
+  session.lastSource = "generic";
   session.conversation = [];
   session.batchResults = [];
   session.history = [];
@@ -96,6 +98,7 @@ export function logSessionMetrics(): void {
 export const session: SessionState = {
   lastExtraction: "",
   lastAnswer: "",
+  lastSource: "generic",
   conversation: [],
   batchResults: [],
   history: [],

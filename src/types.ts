@@ -78,9 +78,21 @@ export interface SessionMetrics {
   tokensSaved: number;
 }
 
+/** Where the answer came from — used for source badge in the UI */
+export type AnswerSource =
+  | "google_serp"      // Google SERP snippet / AI overview (unverified)
+  | "direct_site"      // Agent navigated to the actual site and extracted
+  | "playbook_api"     // ATS API (Ashby / Greenhouse / Lever) — structured data
+  | "pattern_replay"   // Tier 0.4 pattern replay
+  | "trace_replay"     // Tier 0.5 trace replay
+  | "conversational"   // handleConversational — answered from session memory
+  | "heuristic"        // Tier 0 heuristic (e.g. YouTube watch page check)
+  | "generic";         // Default / unknown
+
 export interface SessionState {
   lastExtraction: string;
   lastAnswer: string;
+  lastSource: AnswerSource;    // source of the last answer, for UI badge
   conversation: ConversationEntry[];
   batchResults: BatchResult[];
   history: HistoryEntry[];

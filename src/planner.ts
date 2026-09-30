@@ -22,7 +22,7 @@ import {
   validateAndResolveAttachments,
 } from "./conversation.js";
 import { activePage, navigate, dismissCookies, captureScreenshotBase64 } from "./browser.js";
-import type { PlanAction } from "./types.js";
+import type { PlanAction, AnswerSource } from "./types.js";
 import {
   distillPage,
   getCapturedApiData,
@@ -572,6 +572,7 @@ export async function runAgent(
         markPatternSuccess(template.patternKey);
         patternMatchUsed = template.patternKey;
         session.lastAnswer = replayAnswer;
+        session.lastSource = "pattern_replay";
         console.log(`\n📢 Answer (pattern replay):\n${replayAnswer}\n`);
         addToConversation({ role: "assistant", content: replayAnswer, label: "answer" });
         session.history.push({ ts: ts(), url: await (await activePage(sh, initialPage)).url().catch(() => ""), goal, result: replayAnswer.slice(0, 2000) });
@@ -699,6 +700,7 @@ export async function runAgent(
       if (replaySuccess && replayAnswer) {
         markReplaySuccess(traceMatch.trace.id);
         session.lastAnswer = replayAnswer;
+        session.lastSource = "trace_replay";
         console.log(`\n📢 Answer (from trace replay):\n${replayAnswer}\n`);
         addToConversation({ role: "assistant", content: replayAnswer, label: "answer" });
         session.history.push({ ts: ts(), url: await (await activePage(sh, initialPage)).url().catch(() => ""), goal, result: replayAnswer.slice(0, 2000) });
@@ -826,6 +828,7 @@ export async function runAgent(
           ).map((m) => m[1]!);
           await autoLearnFromPage(page, url, capturedUrls);
           playbooks.recordSuccess(normalizeDomain(url));
+          session.lastSource = "heuristic";
           return heuristic.doneMessage;
           } // end heuristicRelevant else block
         }
@@ -878,6 +881,7 @@ export async function runAgent(
         if (syn?.answer && (syn.isComplete || step >= cfg.agent.maxSteps - 1)) {
           answer = syn.answer;
           session.lastAnswer = answer;
+          session.lastSource = "playbook_api";
           console.log(`\n📢 Answer:\n${answer}\n`);
           addToConversation({ role: "assistant", content: answer, label: "answer" });
           session.history.push({ ts: ts(), url, goal, result: answer.slice(0, 2000) });
@@ -945,6 +949,7 @@ export async function runAgent(
             console.log(`📢 Answer:\n${syn.answer}\n`);
             logSessionMetrics();
             session.lastAnswer = syn.answer;
+            session.lastSource = "google_serp";
             addToConversation({ role: "assistant", content: syn.answer, label: "answer" });
             session.history.push({ ts: ts(), url, goal, result: syn.answer.slice(0, 2000) });
             if (onStep) {
@@ -1090,6 +1095,7 @@ Return ONLY valid JSON action: {"action":"...","instruction":"..."|"url":"..."|"
       const doneMsg = plan.message || "Done";
       answer = doneMsg;
       session.lastAnswer = doneMsg;
+      session.lastSource = "direct_site";
       addToConversation({ role: "assistant", content: doneMsg, label: "answer" });
       session.history.push({ ts: ts(), url, goal, result: doneMsg.slice(0, 2000) });
       console.log(`\n🎉 ${doneMsg}\n`);
@@ -1209,6 +1215,7 @@ Return ONLY valid JSON action: {"action":"...","instruction":"..."|"url":"..."|"
             if (syn?.answer) {
               answer = syn.answer;
               session.lastAnswer = answer;
+              session.lastSource = "playbook_api";
               console.log(`\n📢 Answer:\n${answer}\n`);
               addToConversation({ role: "assistant", content: answer, label: "answer" });
               session.history.push({ ts: ts(), url, goal, result: answer.slice(0, 2000) });
@@ -1314,6 +1321,7 @@ Return ONLY valid JSON action: {"action":"...","instruction":"..."|"url":"..."|"
         if (syn?.isComplete || isFinalStep) {
           answer = syn?.answer || text;
           session.lastAnswer = answer;
+          session.lastSource = "direct_site";
           console.log(`\n📢 Answer:\n${answer}\n`);
           addToConversation({ role: "assistant", content: answer, label: "answer" });
           session.history.push({ ts: ts(), url, goal, result: answer.slice(0, 2000) });
