@@ -37,6 +37,9 @@ build/
 *.webp
 results.csv
 
+# Runtime session state (auto-created, ephemeral)
+data/session.json
+
 # Playwright & Browser caches
 .cache/
 .playwright/
